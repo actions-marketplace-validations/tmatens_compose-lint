@@ -102,6 +102,38 @@ class TestLoadConfig:
         assert disabled == {}
         assert overrides == {}
 
+    def test_rules_null_behaves_like_empty_mapping(self, tmp_path: Path) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text("rules:\n")
+        disabled, overrides, excluded = load_config(config)
+        assert disabled == {}
+        assert overrides == {}
+        assert excluded == {}
+
+    def test_per_rule_null_config_behaves_like_empty_mapping(
+        self, tmp_path: Path
+    ) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text("rules:\n  CL-0001:\n")
+        disabled, overrides, excluded = load_config(config)
+        assert "CL-0001" not in disabled
+        assert "CL-0001" not in overrides
+        assert "CL-0001" not in excluded
+
+    def test_rules_wrong_type_raises(self, tmp_path: Path) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text("rules: hello\n")
+        with pytest.raises(ConfigError, match="'rules' must be a mapping"):
+            load_config(config)
+
+    def test_per_rule_wrong_type_raises(self, tmp_path: Path) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text("rules:\n  CL-0001: hello\n")
+        with pytest.raises(
+            ConfigError, match="Config for rule 'CL-0001' must be a mapping"
+        ):
+            load_config(config)
+
     def test_config_not_mapping(self, tmp_path: Path) -> None:
         config = tmp_path / ".compose-lint.yml"
         config.write_text("- list\n- items\n")
@@ -188,6 +220,60 @@ class TestConfigValidation:
         disabled, _overrides, _excluded = load_config(config)
         assert "CL-0001" not in disabled
 
+    def test_reason_without_enabled_false_warns(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text("rules:\n  CL-0002:\n    reason: we accept this risk\n")
+        disabled, _overrides, _excluded = load_config(config)
+        assert "CL-0002" not in disabled
+        err = capsys.readouterr().err
+        assert "rule 'CL-0002'" in err
+        assert "reason" in err
+        assert "has no effect" in err
+
+    def test_reason_with_enabled_false_is_silent(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text(
+            "rules:\n  CL-0002:\n    enabled: false\n    reason: we accept this risk\n"
+        )
+        disabled, _overrides, _excluded = load_config(config)
+        assert disabled["CL-0002"] == "we accept this risk"
+        assert "has no effect" not in capsys.readouterr().err
+
+    def test_reason_with_enabled_true_warns(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An explicit `enabled: true` is still an enabled rule.
+
+        The warning is about the reason having no effect, not about the
+        `enabled` key being absent — a rule someone deliberately turned on
+        carries the same inert justification as one they never touched.
+        """
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text(
+            "rules:\n  CL-0002:\n    enabled: true\n    reason: we accept this risk\n"
+        )
+        disabled, _overrides, _excluded = load_config(config)
+        assert "CL-0002" not in disabled
+        assert "has no effect" in capsys.readouterr().err
+
+    def test_exclude_services_reason_does_not_warn(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text(
+            "rules:\n"
+            "  CL-0003:\n"
+            "    exclude_services:\n"
+            "      web: entrypoint switches users\n"
+        )
+        _disabled, _overrides, excluded = load_config(config)
+        assert excluded["CL-0003"]["web"] == "entrypoint switches users"
+        assert "has no effect" not in capsys.readouterr().err
+
 
 class TestStrictConfig:
     """strict=True escalates config diagnostics to errors (issue #380)."""
@@ -208,6 +294,15 @@ class TestStrictConfig:
         config = tmp_path / ".compose-lint.yml"
         config.write_text("rules:\n  CL-0001:\n    severty: high\n")
         with pytest.raises(ConfigError, match="unknown key 'severty'"):
+            load_config(config, strict=True)
+
+    def test_reason_without_enabled_false_raises(self, tmp_path: Path) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text("rules:\n  CL-0002:\n    reason: we accept this risk\n")
+        with pytest.raises(
+            ConfigError,
+            match="rule 'CL-0002' has a 'reason' without 'enabled: false'",
+        ):
             load_config(config, strict=True)
 
     def test_valid_config_still_loads_under_strict(
@@ -287,6 +382,18 @@ class TestExcludeServices:
         config.write_text("rules:\n  CL-0003:\n    enabled: false\n")
         _disabled, _overrides, excluded = load_config(config)
         assert excluded == {}
+
+    def test_exclude_services_null_behaves_like_empty(self, tmp_path: Path) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text("rules:\n  CL-0003:\n    exclude_services:\n")
+        _disabled, _overrides, excluded = load_config(config)
+        assert excluded == {"CL-0003": {}}
+
+    def test_exclude_services_wrong_type_raises(self, tmp_path: Path) -> None:
+        config = tmp_path / ".compose-lint.yml"
+        config.write_text("rules:\n  CL-0003:\n    exclude_services: 5\n")
+        with pytest.raises(ConfigError, match="must be a list or mapping"):
+            load_config(config)
 
     def test_invalid_scalar_value(self, tmp_path: Path) -> None:
         config = tmp_path / ".compose-lint.yml"

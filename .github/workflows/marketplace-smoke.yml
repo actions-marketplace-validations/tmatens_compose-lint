@@ -42,8 +42,9 @@ on:
     paths:
       - .github/workflows/marketplace-smoke.yml
   schedule:
-    # Weekly re-verification of both published surfaces. Failures email
-    # the workflow author (see docs/CI.md "Where findings land").
+    # Weekly re-verification of both published surfaces. A failure opens
+    # an issue via the report-failure job below (see docs/CI.md "Where
+    # findings land").
     - cron: "13 9 * * 1"
 
 permissions: {}
@@ -53,7 +54,7 @@ permissions: {}
 # bump-marketplace-smoke-pin seds this literal line, which does not care
 # where in the file it lives.
 env:
-  CL_RELEASE_TAG: v0.26.0
+  CL_RELEASE_TAG: v0.29.0
 
 jobs:
   # This workflow's whole point is to run moments after a publish — the
@@ -109,7 +110,7 @@ jobs:
           persist-credentials: false
 
       - name: Clean fixture should pass
-        uses: tmatens/compose-lint@eb8e66eaee240fb47f970ea65096a4fd6cb9a8fa # v0.26.0
+        uses: tmatens/compose-lint@34fa9ae3fc89217b270668522dfa13855b91581a # v0.29.0
         with:
           files: tests/smoke/clean.yml
           fail-on: high
@@ -117,7 +118,7 @@ jobs:
       - name: Insecure fixture should fail
         id: insecure
         continue-on-error: true
-        uses: tmatens/compose-lint@eb8e66eaee240fb47f970ea65096a4fd6cb9a8fa # v0.26.0
+        uses: tmatens/compose-lint@34fa9ae3fc89217b270668522dfa13855b91581a # v0.29.0
         with:
           files: tests/smoke/insecure.yml
           fail-on: high
@@ -274,3 +275,42 @@ jobs:
             echo "::error::Expected exit code 1 from ${CL_RUN}, got ${exit_code}"
             exit 1
           fi
+
+  # Neither unattended trigger has a PR to go red on. Without this the only
+  # signal was an email to the workflow author, which is how a broken run
+  # stays broken. Downstream of every job so one report covers the whole
+  # run, and the only job holding issues: write.
+  #
+  # The push leg matters as much as the schedule. A push here is the
+  # pin-bump merge, so this run is the end-to-end check on a release that
+  # has ALREADY shipped to PyPI, Docker Hub and GitHub Releases — there is
+  # no gate left to fail closed, and the next signal after a silent failure
+  # is a user's workflow breaking. It was covered only by whoever clicked
+  # merge happening to watch the run; that stopped being a person when the
+  # pin PR started automerging.
+  #
+  # workflow_dispatch is deliberately excluded: someone dispatched it and is
+  # watching the tab.
+  report-failure:
+    name: Report unattended failure
+    needs:
+      - pypi-propagated
+      - marketplace-smoke
+      - precommit-published-smoke
+      - oneshot-runners-smoke
+    if: >-
+      failure() && (github.event_name == 'schedule'
+      || github.event_name == 'push')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: $/.github/actions/report-scheduled-failure
+        with:
+          trigger: ${{ github.event_name == 'push' && 'Post-release' || 'Scheduled' }}
+          note: >-
+            ${{ github.event_name == 'push'
+            && 'The post-release smoke did not pass, so the release that just published to PyPI, Docker Hub and GitHub Releases is unverified on the surfaces users actually consume. Publishing cannot be undone: triage toward a follow-up release, not a retry.'
+            || 'The weekly re-verification did not complete, so the published action, pre-commit hook and one-shot forms are unwatched.' }}

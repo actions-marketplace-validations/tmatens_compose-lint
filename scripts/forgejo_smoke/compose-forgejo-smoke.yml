@@ -5,21 +5,22 @@
 # compose-lint against this file (it would rightly object to the Docker
 # socket mount the runner needs to spawn job containers).
 #
-# Renovate tracks this file (docker-compose manager) now that it lives
-# outside tests/ — config:recommended's :ignoreModulesAndTests preset
-# ignores tests/** wholesale, which is how the 16.0.2 pin went 404
-# unnoticed (#746, #748). Codeberg deletes a superseded Forgejo patch
-# tag — pinned digest included — within days of the next patch
-# shipping, so a renovate.json rule schedules bumps here "at any time"
-# instead of waiting for the weekly window; merge stays manual. A
-# version bump re-runs the harness when it merges (the workflow
-# triggers on pushes touching this file). The versions here are what
-# docs/forgejo.md's "Verified on ..." line claims: forgejo_smoke.py
-# asserts the claim against the *live* instance, so bumping an image
-# without updating docs/forgejo.md fails the run.
+# The image pins here are moved by forgejo-smoke-bump.yml, daily, NOT by
+# Renovate: the hosted Renovate cannot look up codeberg.org or
+# data.forgejo.org (Dependency Dashboard: "no-result"), so the bump PR
+# that #748 moved this file out of tests/ to get never opened — and the
+# 16.0.2 pin went 404 the way #746 describes. Codeberg deletes a
+# superseded Forgejo patch tag — pinned digest included — within days of
+# the next patch shipping, which is why the watcher is daily. The bump
+# PR moves docs/forgejo.md's "Verified on ..." line in the same commit:
+# forgejo_smoke.py asserts that claim against the *live* instance, so an
+# image bump without the docs line fails the run — which also runs on
+# the bump PR itself (pull_request trigger on this path) and is its
+# review. Merge stays manual. Both pins are `<tag>@<manifest-list
+# digest>`; scripts/forgejo_smoke_bump.py refuses a per-arch digest.
 services:
   forgejo:
-    image: codeberg.org/forgejo/forgejo:16.0.3@sha256:7c4e1db440be7b2ca685b49d0d7864cdd78e92431f531bf7893659def8200fc5
+    image: codeberg.org/forgejo/forgejo:16.0.4@sha256:a3e33d03e771d3e58b27de5573c3a25dc4f670583a6724c1878a6d0bbecf3556
     environment:
       # Headless install: lock the installer and configure via env.
       FORGEJO__security__INSTALL_LOCK: "true"
@@ -39,7 +40,7 @@ services:
     networks: [forgejo-smoke]
 
   runner:
-    image: data.forgejo.org/forgejo/runner:13.0.0@sha256:7fb853bfe73c229be6349398359c0a7bd01fadfd17c106607b2221150b799ed2
+    image: data.forgejo.org/forgejo/runner:13.1.0@sha256:c4af85fd9f0dd03788676a534781a87c71aa2c6a37737143e017eb94d4312952
     # root so the runner can use the host Docker socket on the CI runner.
     user: root
     depends_on: [forgejo]

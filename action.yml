@@ -85,7 +85,7 @@ runs:
         # the package it installs. Release automation keeps DEFAULT_VERSION in
         # step with the release, and CI's "Version strings in sync" job fails
         # if it drifts.
-        DEFAULT_VERSION="0.26.0"
+        DEFAULT_VERSION="0.29.0"
         if [ -z "$CL_VERSION" ]; then
           SPEC="compose-lint==${DEFAULT_VERSION}"
         elif [ "$CL_VERSION" = "latest" ]; then
@@ -275,6 +275,6 @@ runs:
       # `always()` uploaded whatever was at the path even when the lint step
       # had failed before producing a document.
       if: inputs.sarif-file != '' && inputs.upload-sarif == 'true' && !cancelled() && steps.lint.outputs.sarif-written == 'true'
-      uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+      uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
       with:
         sarif_file: ${{ inputs.sarif-file }}

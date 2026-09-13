@@ -56,26 +56,67 @@ pip install -e ".[dev]"
 git config core.hooksPath .githooks
 ```
 
-The last command activates the repo's git hooks. The `pre-push` hook blocks unsigned commits — see [commit signing](#commit-signing) for setup.
+The last command activates the repo's git hooks. The `pre-push` hook blocks a commit whose `Signed-off-by` trailer is missing or does not match its author, and warns about an unsigned one — see [DCO](#developer-certificate-of-origin) and [commit signing](#commit-signing).
 
 ## Local quality checks
 
-All four must pass locally before you push. CI runs the same commands.
+One command runs every gate a PR faces — the four code gates below, both
+coverage gates, actionlint and zizmor over the workflows, and the five checks
+on your commits (signature, DCO trailer, no AI attribution, subject length, no
+Conventional Commits prefix) — with the same commands CI uses, and prints one
+summary:
+
+```bash
+scripts/preflight.sh            # everything CI checks; --quick skips the test suite
+```
+
+A green preflight is a green PR. Run it before every push; the commit checks
+are where a first PR here usually stalls, and CI cannot tell you about them
+until a maintainer has approved the run.
+
+The workflow gates skip themselves when the tool is not installed, so they
+never block a change that touches no workflow. `zizmor` comes with the dev
+lock; `actionlint` is a [release binary](https://github.com/rhysd/actionlint/releases)
+CI downloads per run. **If you install it, invoke it through
+`scripts/preflight.sh` rather than bare:** the pinned release predates
+GitHub's `$/` self-repository syntax and reports a failure for every workflow
+in this repo, on a clean tree. The script passes the two `-ignore` patterns CI
+uses, so you see real findings only.
+
+The four code gates, if you want them individually:
 
 ```bash
 ruff check src/ tests/          # Linting
 ruff format --check src/ tests/ # Formatting
-mypy src/                       # Type checking (strict mode)
+mypy src/ tests/                # Type checking (strict on src/, relaxed on tests/)
 pytest                          # Tests
 ```
 
-Statement coverage must stay >= 80% on `main`. The CI `coverage` job
-enforces this; check locally before pushing a change that touches a lot
-of code:
+Coverage is gated twice. Statement coverage must stay >= 80% across the
+package, and **90% of the lines your PR adds or changes must be covered**.
+The second gate is the one a PR is likely to hit: a repo-wide percentage
+cannot see a few new untested lines, so the patch gate is what actually asks
+whether your change brought tests. Check both locally before pushing:
+
+`scripts/preflight.sh` runs both, measured the way CI measures them. The
+CLI and integration suites spawn `python -m compose_lint`, and CI counts
+those children by calling `coverage.process_startup()` in every interpreter;
+a bare `pytest --cov` does not, so its number is lower than the one CI
+reports for the same tree. To reproduce CI's figure by hand:
 
 ```bash
-pytest --cov=compose_lint --cov-report=term-missing --cov-fail-under=80
+shim=$(mktemp -d) && printf 'import coverage\ncoverage.process_startup()\n' > "$shim/sitecustomize.py"
+PYTHONPATH="$shim" COVERAGE_PROCESS_START="$PWD/pyproject.toml" \
+  pytest --cov=compose_lint --cov-report=xml --cov-fail-under=80   # the repo-wide floor
+python .github/scripts/patch-coverage.py \
+  --base-sha "$(git merge-base HEAD upstream/main)" --fail-under 90   # the lines you changed
 ```
+
+(`origin/main` instead of `upstream/main` if you are not on a fork.) The
+patch script names the uncovered lines. If one is genuinely untestable,
+mark it `# pragma: no cover` with a comment saying why, rather than dropping
+the threshold. A PR that changes only docs, tests or metadata has no
+measurable line and passes.
 
 On hosts where `/tmp` is mounted `noexec` (hardened containers), point
 pytest's temp directory somewhere executable first — the action-contract
@@ -96,6 +137,39 @@ TMPDIR=$HOME/.pytest-tmp pytest --basetemp=$HOME/.pytest-tmp/bt
   Never leak parser-specific types into rule code.
 - **Latest stable versions** for any new dependency unless there's a specific,
   documented reason otherwise.
+
+## Conventions the diff won't show you
+
+Five rules that reviews here have asked for and no file stated. Each names
+the test that enforces it, or says that a reviewer does.
+
+- **Every list in the docs is exhaustive, and tested.** The Validation bullets
+  in `docs/configuration.md` are held to the `_warn` sites in `config.py`
+  (`tests/test_config_surfaces.py`, through paired `# diag:` /
+  `<!-- diag: -->` markers); a rule page's pattern and exemption lists are held
+  to the rule's tuples (`tests/test_rule_doc_surfaces.py`); every rule is held
+  to every surface that lists rules (`tests/test_rule_surfaces.py`). Adding to
+  the code means adding to the page in the same PR, and CI names the missing
+  entry.
+- **One grammar, one reader.** A regex or grammar lives in one module and is
+  imported from there — `_env_file.py` takes the `${...}` grammar from
+  `rules/_interpolation` "so the two readers cannot drift". A second copy of
+  the rule-id regex in `cli.py` is what sank the first revision of #726: it
+  matched the raw argument while the original matched the normalized one.
+  Reviewed by hand.
+- **Retired rule ids are a closed set.** `CL-0012`, `CL-0015` and `CL-0023`
+  are fallow under [ADR-028](docs/adr/028-pre-1.0-rule-id-sweep.md) and never
+  reused; a post-1.0 retirement keeps a tombstone doc page
+  ([ADR-032](docs/adr/032-rule-retirement-is-minor-with-lifecycle.md) §4) and
+  does not join that set.
+  `tests/test_rule_surfaces.py::test_retired_ids_are_not_reused`.
+- **A comment that cites provenance must be right.** Test groups are labelled
+  with the issue whose corpus evidence they came from; a key filed under the
+  wrong label misstates why it is there (#685). Reviewed by hand.
+- **Say what you claim, test what you say.** Every output format or behaviour
+  change the PR body names has an assertion — SARIF as well as JSON (#670),
+  the cases the issue did not list but the change covers (#675). The PR
+  template's Evidence section asks for exactly this.
 
 ## Adding a new rule
 
@@ -166,7 +240,8 @@ TMPDIR=$HOME/.pytest-tmp pytest --basetemp=$HOME/.pytest-tmp/bt
   not "Added CL-0011" or "CL-0011".
 - **Explain the *why* in the body, not just the *what*.** The diff already
   shows what changed; the commit message exists to explain the reason.
-- **Sign your commits.** See [commit signing](#commit-signing) below.
+- **Signing your commits is recommended, not required.** See
+  [commit signing](#commit-signing) below for what it adds and how.
 - **Sign off your commits.** Use `git commit -s` to add the
   `Signed-off-by:` trailer required by the
   [DCO](#developer-certificate-of-origin) — this is separate from
@@ -188,9 +263,17 @@ because they read naturally in `git log` without tooling.
 
 ### Commit signing
 
-All commits to `main` must be signed so GitHub shows the "Verified" badge.
-Unsigned commits can be spoofed — anyone can set `user.email` to yours and
-open a PR from a fork that attributes to you.
+Signing is **recommended, not required**. Every commit on `main` is signed
+regardless: squash is the only merge method here, and GitHub signs the squash
+commit with its own key, so `main`'s history verifies whether or not the PR's
+commits did (all of it does — checked against the API, not assumed).
+
+What a signed PR commit adds is about *you*, not `main`: it binds the author
+field to a key on your GitHub account. A `Signed-off-by` trailer alone cannot
+do that — anyone can set `user.email` to anyone's address — so a **Verified**
+badge is what makes "this person wrote this" provable rather than asserted.
+Worth the two minutes if you want your name in the history to be
+demonstrably yours; skip it and nothing blocks.
 
 SSH signing is the easiest setup because it uses the same key you already
 push with:
@@ -211,11 +294,16 @@ Verify locally with `git log --show-signature`. If it prints
 
 ### Developer Certificate of Origin
 
-All commits must carry a `Signed-off-by:` trailer certifying that you wrote
-the change (or have the right to submit it under this project's MIT license).
-This is the [Developer Certificate of Origin](https://developercertificate.org).
+Every commit that carries authored changes must have a `Signed-off-by:`
+trailer certifying that you wrote the change (or have the right to submit it
+under this project's MIT license). This is the
+[Developer Certificate of Origin](https://developercertificate.org).
 It is independent of [commit signing](#commit-signing) above: cryptographic
 signing proves *who committed*, DCO asserts *right to contribute*.
+
+Merge commits are exempt — they introduce no authored content, so there is
+nothing for their author to certify. CI skips them, as the GitHub DCO app
+does.
 
 Add the trailer with `-s`:
 
@@ -233,9 +321,19 @@ What catches a commit that is missing it is the repo's `pre-push` hook, which
 refuses the push before a PR ever exists — provided you ran the
 `git config core.hooksPath .githooks` from [Development setup](#development-setup).
 
-The `Signed-off-by` name and email must match your commit author identity. CI
-will block the PR if any commit is missing a matching trailer. Fix existing
-commits with `git commit --amend --signoff` or `git rebase --signoff main`.
+The `Signed-off-by` name and email must match your commit author identity
+**exactly**. A trailer that names you but carries a different address — a
+personal address on a commit authored as `...@users.noreply.github.com`, say —
+does not satisfy the check, which reports the expected and found trailers
+side by side so the difference is visible. Fix existing commits with
+`git commit --amend --signoff` or `git rebase --signoff main`.
+
+When your branch conflicts with `main`, **rebase and re-push with
+`--force-with-lease`** rather than using GitHub's "Update branch" button. The
+button writes a merge commit with no `Signed-off-by` trailer, which fails the
+DCO check; a linear branch is also what this repo squashes cleanly. Being
+merely *behind* `main` is not a reason to rebase — the ruleset does not
+require it, and `main`'s own run re-tests every merge.
 
 ## Pull requests
 
@@ -244,8 +342,8 @@ All changes to `main` go through a PR — including maintainer changes.
 **External contributors:** you won't have push access to this repository.
 [Fork it](https://github.com/tmatens/compose-lint/fork), create your branch on
 the fork, and open the PR from that branch back to `main` here. Everything
-below applies the same way; the DCO and commit-signing checks run on fork PRs
-too, so set those up before your first commit.
+below applies the same way; the DCO check runs on fork PRs too, so set the
+sign-off up before your first commit.
 
 Add this repository as a second remote when you clone your fork. `origin` is
 **your fork**, not this repository, so any instruction phrased as
@@ -259,9 +357,10 @@ cd compose-lint
 git remote add upstream https://github.com/tmatens/compose-lint.git
 ```
 
-Then `git fetch upstream` and rebase onto `upstream/main`. `main` here moves
-several times a day, and the ruleset requires a PR to be up to date before it
-merges, so expect to rebase before yours lands:
+Then, when a rebase is called for — a conflict with `main`, or a change of
+yours you want to build on — rebase onto `upstream/main`. Being behind `main`
+is not by itself a reason: the ruleset does not require a PR to be up to date,
+and `main`'s own run re-tests every merge. When you do:
 
 ```bash
 git fetch upstream && git rebase upstream/main
@@ -281,8 +380,18 @@ check fails on a commit you did not write.
    `fix/parser-merge-keys`.
 2. **Make small, focused commits** (see [commit conventions](#commit-conventions)).
 3. **Run local checks.** All four must pass before you push.
-4. **Open a PR** and fill out the template. Link any related issue.
-5. **Wait for CI** — all required checks must be green before merge.
+4. **Open a PR** and fill out the template. Link any related issue. The
+   template is short because CI covers most of what a checklist used to
+   claim — sign-off, the four local gates, AI attribution, the rule surfaces,
+   the severity matrix — and a reviewer reads those off the checks tab. What
+   it asks for instead is the evidence no check can produce: which tests
+   cover this and what they assert, and what the change makes wrong
+   elsewhere. Answer those in your own words; a question you find you can't
+   answer is worth more to you than a ticked box.
+5. **Wait for CI** — all required checks must be green before merge. On your
+   first PR here the checks stay grey until a maintainer approves the run;
+   that is GitHub's fork gate, not something you did, and it lifts for good
+   once you have a commit merged.
 6. **Respond to review comments.** All comments must be resolved before merge.
 7. **Squash-merge** when approved. We use squash-merge exclusively so `main`
    stays linear with one commit per logical change. The full PR history is
@@ -299,10 +408,13 @@ check fails on a commit you did not write.
 - **Don't mix refactors with behavior changes.** Land the refactor first, then
   the behavior change, in separate PRs.
 - **Update tests.** New rules need positive and negative tests. Bug fixes need
-  a regression test.
+  a regression test. CI measures this: 90% of the lines your PR touches must
+  be covered (see "Local quality checks" for how to run the same check
+  yourself).
 - **Update documentation** if you change behavior. Rule changes need
-  `docs/rules/CL-XXXX.md`; CLI changes need `README.md`; version-visible
-  changes need a CHANGELOG entry.
+  `docs/rules/CL-XXXX.md`; CLI changes need `README.md`. You do not need a
+  `CHANGELOG.md` entry — see "You get credited" above, the releaser writes
+  it. Adding one is welcome, not expected.
 - **Do not regenerate the corpus snapshot.** If your change touches rule
   predicates, severity, or finding line attribution, say so in the PR and leave
   `tests/corpus_snapshot.json.gz` alone. A maintainer regenerates it and

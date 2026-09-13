@@ -43,7 +43,7 @@ jobs:
           name: scorecard-results
           path: results.sarif
           retention-days: 5
-      - uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: results.sarif
 
@@ -53,20 +53,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
+      contents: read
       issues: write
     steps:
-      - name: Open or update scheduled-failure issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WORKFLOW: ${{ github.workflow }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          title="Scheduled run failed: ${WORKFLOW}"
-          body=$(printf -- '- Workflow: **%s**\n- Run: %s\n- Commit: %s\n\nReopen or close when triaged.' \
-            "${WORKFLOW}" "${RUN_URL}" "${GITHUB_SHA}")
-          existing=$(gh issue list --state open --search "\"${title}\" in:title" --json number --jq '.[0].number // empty')
-          if [ -n "${existing}" ]; then
-            gh issue comment "${existing}" --body "${body}"
-          else
-            gh issue create --title "${title}" --body "${body}"
-          fi
+      - uses: $/.github/actions/report-scheduled-failure

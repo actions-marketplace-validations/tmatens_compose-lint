@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "compose-lint"
-version = "0.26.0"
+version = "0.29.0"
 description = "Security-focused linter for Docker Compose files. Catches dangerous misconfigurations before they reach production — grounded in OWASP and the CIS Docker Benchmark; emits SARIF for GitHub Code Scanning."
 readme = "README.md"
 license = "MIT"
@@ -51,14 +51,18 @@ dependencies = [
 # "Development dependencies" — and Dependabot's weekly pass bumps
 # them.
 lint = [
-    "ruff==0.16.4",
+    "ruff==0.16.6",
+    # Workflow auditor beside actionlint in ci.yml's `actionlint` job:
+    # template injection, cache poisoning, dangerous triggers, kept
+    # credentials, unpinned uses. Config in .github/zizmor.yml.
+    "zizmor==1.30.1",
 ]
 security = [
     "bandit==1.9.4",
     "pip-audit==2.10.1",
 ]
 publish = [
-    "build==1.5.1",
+    "build==1.6.0",
     "twine==7.0.0",
     # Used by the post-release canary in publish.yml to verify the
     # Sigstore bundles attached to the GitHub Release. Matches the
@@ -70,7 +74,7 @@ publish = [
 # the generated requirements-build.lock hash-pins only what's needed to
 # invoke `python -m build`, without pulling in pytest/ruff/mypy/etc.
 container = [
-    "build==1.5.1",
+    "build==1.6.0",
 ]
 # Chart generation for the State of Compose report (scripts/corpus/charts.py).
 # Manual maintainer task run at report-refresh time, not a CI job — so this
@@ -90,6 +94,10 @@ dev = [
     # Self-reference so the ruff pin lives only in [lint]; no drift.
     "compose-lint[lint]",
     "check-jsonschema==0.38.0",
+    # Patch-coverage gate: grades the lines a PR adds or changes against the
+    # same coverage.xml the statement gate already produces. Threshold and
+    # rationale live in ci.yml's `coverage` job.
+    "diff-cover==10.5.1",
     "mutmut==3.7.0",
     "mypy==2.3.1",
     # Drives the `precommit-smoke` job: `pre-commit try-repo` runs
@@ -100,7 +108,7 @@ dev = [
     # Statement coverage gate (>=80%) is enforced by the `coverage` CI job.
     # Threshold lives in [tool.coverage.report] below.
     "pytest-cov==7.1.0",
-    "types-pyyaml==6.0.12.20260815",
+    "types-pyyaml==6.0.12.20260906",
 ]
 
 [project.scripts]
@@ -109,7 +117,7 @@ compose-lint = "compose_lint.cli:main"
 [project.urls]
 Homepage = "https://github.com/tmatens/compose-lint"
 Source = "https://github.com/tmatens/compose-lint"
-Documentation = "https://github.com/tmatens/compose-lint/tree/main/docs"
+Documentation = "https://tmatens.github.io/compose-lint/"
 Issues = "https://github.com/tmatens/compose-lint/issues"
 Changelog = "https://github.com/tmatens/compose-lint/blob/main/CHANGELOG.md"
 
@@ -127,8 +135,10 @@ branch = false  # statement coverage — what OpenSSF Silver `test_statement_cov
 # `parallel = true` lets each subprocess write to its own .coverage.* data
 # file; `coverage combine` (pytest-cov runs it) merges them. Pair with the
 # `.pth` shim and `COVERAGE_PROCESS_START=pyproject.toml` env var that the
-# `coverage` CI job sets up — without those, child processes are unmeasured
-# and statement coverage caps near 72% (cli.py + formatters/text.py).
+# `coverage` CI job sets up — and `scripts/preflight.sh` reproduces. Without
+# them the children go unmeasured: 88% against 91% on the same tree, measured
+# 2026-09-10, so a bare `pytest --cov` reports a lower number than CI for a
+# change that added nothing.
 parallel = true
 
 [tool.coverage.report]
@@ -158,6 +168,18 @@ also_copy = [
 
 [tool.mypy]
 strict = true
+
+# Tests are checked too, but not at strict: fixtures and parametrize tables
+# lean on bare generics and untyped helpers, and annotating every one of
+# them buys nothing. The real errors (wrong attribute, None indexed, bad
+# argument type) still fail.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_any_generics = false
+warn_return_any = false
 
 [tool.ruff]
 target-version = "py311"

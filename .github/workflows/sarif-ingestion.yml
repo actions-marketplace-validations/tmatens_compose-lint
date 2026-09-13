@@ -76,7 +76,7 @@ jobs:
       # tests/test_sarif_ingestion_probe.py holds this step to that contract
       # at PR time.
       - name: Upload the probe SARIF to Code Scanning
-        uses: ./
+        uses: $/
         with:
           files: tests/smoke/insecure.yml tests/smoke/sarif-shape.yml tests/smoke/clean.yml
           config: tests/smoke/sarif-probe-config.yml
@@ -149,7 +149,7 @@ jobs:
           python3 -c "import json;d=json.load(open('working-tree.sarif'));print('locations:',sorted({r['locations'][0]['physicalLocation']['artifactLocation']['uri'] for r in d['runs'][0]['results']}))"
 
       - name: Upload the working tree's SARIF to Code Scanning
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: working-tree.sarif
           category: compose-lint-working-tree
@@ -172,3 +172,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/verify_sarif_ingestion.py cleanup
+
+  # Scheduled runs have no PR to go red on. Without this the only signal
+  # for a weekly failure was an email to the workflow author, which is how
+  # a broken schedule stays broken. Downstream of every job so one report
+  # covers the whole run, and the only job holding issues: write.
+  report-failure:
+    name: Report scheduled failure
+    needs:
+      - ingest
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: $/.github/actions/report-scheduled-failure

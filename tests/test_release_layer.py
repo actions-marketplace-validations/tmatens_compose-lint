@@ -31,7 +31,7 @@ _CREDENTIAL_MARKERS = (
 )
 
 
-def _load(name: str) -> dict[str, Any]:
+def _load(name: str) -> dict[Any, Any]:
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
@@ -81,7 +81,7 @@ def test_the_tag_gate_is_a_reusable_workflow() -> None:
     doc = _load("verify-tag.yml")
     # YAML 1.1 resolves the bare key `on` to the boolean True — the same
     # coercion CL-0002 has to handle for `privileged: on`.
-    triggers = doc.get("on", doc.get(True))
+    triggers = doc["on"] if "on" in doc else doc[True]
     assert "workflow_call" in triggers
     assert "tag" in triggers["workflow_call"]["inputs"]
 
@@ -168,11 +168,14 @@ def test_no_workflow_resolves_dependencies_from_an_unpinned_index() -> None:
 
 
 def test_the_dockerhub_description_dispatch_is_pinned_to_the_default_branch() -> None:
-    """`workflow_dispatch` can name any ref, and `uses: ./…` runs workspace code.
+    """`workflow_dispatch` can name any ref; the checkout pin is what it still buys.
 
     The Docker Hub secrets here are repo-level, so nothing scopes them to a ref.
-    Pinning the checkout means a dispatcher chooses only *when* this runs, not
-    *what* runs with a Read+Write+Delete token.
+    The composite is a `$/` reference, resolved at the running commit — the
+    dispatched ref, which is also where this workflow file comes from — so the
+    pin does not scope the code. It scopes the two files the composite reads
+    from the workspace: the sync script and the overview markdown. The rest of
+    the gap is the `dockerhub-description` environment (docs/RELEASING.md).
     """
     jobs = _load("dockerhub-description.yml")["jobs"]
     checkout = next(
@@ -191,7 +194,7 @@ def test_the_dockerhub_credential_is_only_read_by_first_party_code() -> None:
             continue
         # The token is passed as an input to the local composite action only.
         assert "secrets.DOCKERHUB_TOKEN" in line
-    assert "uses: ./.github/actions/update-dockerhub-description" in raw
+    assert "uses: $/.github/actions/update-dockerhub-description" in raw
 
 
 # --- A called workflow gets what its jobs ask for ------------------------
@@ -220,7 +223,7 @@ def _reusable_calls() -> list[tuple[str, str, str]]:
     for path in sorted(WORKFLOWS.glob("*.yml")):
         for job_name, job in (_load(path.name).get("jobs") or {}).items():
             uses = str(job.get("uses", ""))
-            if uses.startswith("./.github/workflows/"):
+            if uses.startswith(("$/.github/workflows/", "./.github/workflows/")):
                 calls.append((path.name, job_name, uses.rsplit("/", 1)[-1]))
     return calls
 
@@ -438,3 +441,146 @@ def test_the_development_status_classifier_matches_the_major_version() -> None:
             f"version is {version.group(1)}, so the classifier should still be "
             f"'4 - Beta', not {status!r}."
         )
+
+
+# --- Every job is bounded and every checkout drops the token --------------
+
+
+def _every_workflow() -> list[str]:
+    return sorted(path.name for path in WORKFLOWS.glob("*.yml"))
+
+
+@pytest.mark.parametrize("workflow", _every_workflow())
+def test_every_job_sets_a_timeout(workflow: str) -> None:
+    """The default is six hours of runner time and a held concurrency slot.
+
+    A hung step, a stuck download, or a PR that makes a job wait costs the
+    whole window. A job that calls a reusable workflow cannot carry the key;
+    the callee's jobs do, and this test visits the callee too.
+    """
+    for name, job in _load(workflow)["jobs"].items():
+        if "uses" in job:
+            continue
+        assert "timeout-minutes" in job, (
+            f"{workflow}: job {name!r} has no timeout-minutes"
+        )
+
+
+@pytest.mark.parametrize("workflow", _every_workflow())
+def test_every_checkout_drops_the_token(workflow: str) -> None:
+    """actions/checkout writes the token into .git/config unless told not to.
+
+    From there any later step, third-party action, or uploaded artifact can
+    read it. Two jobs push a branch with it on purpose and say so with an
+    explicit ``true``; every other checkout says ``false``. What is not
+    allowed is the default, which keeps the token without anyone deciding to.
+    """
+    for name, job in _load(workflow)["jobs"].items():
+        for step in job.get("steps", []):
+            if not str(step.get("uses", "")).startswith("actions/checkout@"):
+                continue
+            persist = (step.get("with") or {}).get("persist-credentials")
+            where = f"{workflow}: job {name!r}"
+            assert persist is not None, (
+                f"{where} checks out without an explicit persist-credentials"
+            )
+            if persist is True:
+                scopes = job.get("permissions") or {}
+                assert scopes.get("contents") == "write", (
+                    f"{where} keeps the token but cannot push"
+                )
+
+
+# --- Every scheduled workflow reports its failures ------------------------
+
+_REPORTER = "$/.github/actions/report-scheduled-failure"
+
+
+def _scheduled_workflows() -> list[str]:
+    names = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        # PyYAML reads the bare `on:` key as boolean True.
+        triggers = doc.get(True) or doc.get("on") or {}
+        if isinstance(triggers, dict) and "schedule" in triggers:
+            names.append(path.name)
+    return names
+
+
+def test_the_scheduled_workflow_scan_finds_something() -> None:
+    """Guard the guard: an empty scan would make the check below vacuous."""
+    assert len(_scheduled_workflows()) >= 5
+
+
+@pytest.mark.parametrize("workflow", _scheduled_workflows())
+def test_every_scheduled_workflow_reports_a_failure_as_an_issue(workflow: str) -> None:
+    """A scheduled run has no PR to go red on.
+
+    Without a reporter the only signal is an email to the workflow author,
+    which is how a broken schedule stays broken. Every workflow with a
+    ``schedule`` trigger calls the shared reporter, by its ``$/`` reference,
+    from a job that can open the issue.
+    """
+    jobs = _load(workflow)["jobs"]
+    reporting = [
+        (name, job)
+        for name, job in jobs.items()
+        if any(step.get("uses") == _REPORTER for step in job.get("steps", []))
+    ]
+    assert reporting, f"{workflow}: no job calls {_REPORTER}"
+    for name, job in reporting:
+        where = f"{workflow}: job {name!r}"
+        assert (job.get("permissions") or {}).get("issues") == "write", (
+            f"{where} calls the reporter without issues: write"
+        )
+        steps = job["steps"]
+        reporter_at = next(i for i, s in enumerate(steps) if s.get("uses") == _REPORTER)
+        condition = str(steps[reporter_at].get("if") or job.get("if") or "")
+        assert "failure()" in condition and "schedule" in condition, (
+            f"{where} does not gate the reporter on a scheduled failure"
+        )
+
+
+# --- The Docker Hub write token is read only where something is pushed ------
+
+_PUSH_MARKERS = ("push=true", "imagetools create", "update-dockerhub-description")
+
+
+def _dockerhub_logins() -> list[tuple[str, str, str, bool]]:
+    """(workflow, job, secret name, job pushes) for every Docker Hub credential use."""
+    found = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        raw = path.read_text(encoding="utf-8")
+        for job_name in _load(path.name)["jobs"]:
+            match = re.search(rf"^  {re.escape(job_name)}:$", raw, re.MULTILINE)
+            assert match, job_name
+            nxt = re.search(r"^  [A-Za-z0-9_-]+:$", raw[match.end() :], re.MULTILINE)
+            body = raw[match.start() : match.end() + nxt.start() if nxt else len(raw)]
+            for secret in re.findall(r"secrets\.(DOCKERHUB_(?:READ_)?TOKEN)", body):
+                pushes = any(marker in body for marker in _PUSH_MARKERS)
+                found.append((path.name, job_name, secret, pushes))
+    return found
+
+
+def test_the_dockerhub_login_scan_finds_something() -> None:
+    """Guard the guard: an empty scan would make the check below vacuous."""
+    assert len(_dockerhub_logins()) >= 6
+
+
+@pytest.mark.parametrize(
+    ("workflow", "job_name", "secret", "pushes"), _dockerhub_logins()
+)
+def test_the_write_token_is_read_only_where_something_is_pushed(
+    workflow: str, job_name: str, secret: str, pushes: bool
+) -> None:
+    """A credential's blast radius is set by its most privileged consumer.
+
+    A job that only pulls and scans logs in with the read-only token; the
+    delete-capable token is referenced only by jobs that push by digest,
+    assemble the manifest, or sync the description. A scan job that starts
+    referencing the write token widens what a leak from it carries.
+    """
+    expected = "DOCKERHUB_TOKEN" if pushes else "DOCKERHUB_READ_TOKEN"
+    assert secret == expected, (
+        f"{workflow}: job {job_name!r} uses {secret}, expected {expected}"
+    )

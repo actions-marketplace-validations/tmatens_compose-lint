@@ -26,10 +26,12 @@ jobs:
         with:
           persist-credentials: false
 
+      # Read-only PAT: this job pulls and scans, never pushes. The write
+      # token is referenced only by the jobs that push or sync.
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
 
       # Full-severity sweep, ordered first so it also warms the Scout
       # CLI. `docker/scout-action` downloads its ~180 MB binary from the
@@ -105,7 +107,7 @@ jobs:
       # step fails on a genuine critical (the sweep wrote the file
       # already) and skips only when no scan produced one.
       - name: Upload Scout results to GitHub Security
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         if: always() && hashFiles('scout-results.sarif') != ''
         with:
           sarif_file: scout-results.sarif
@@ -113,17 +115,4 @@ jobs:
 
       - name: Report scheduled failure as issue
         if: failure() && github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WORKFLOW: ${{ github.workflow }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          title="Scheduled run failed: ${WORKFLOW}"
-          body=$(printf -- '- Workflow: **%s**\n- Run: %s\n- Commit: %s\n\nReopen or close when triaged.' \
-            "${WORKFLOW}" "${RUN_URL}" "${GITHUB_SHA}")
-          existing=$(gh issue list --state open --search "\"${title}\" in:title" --json number --jq '.[0].number // empty')
-          if [ -n "${existing}" ]; then
-            gh issue comment "${existing}" --body "${body}"
-          else
-            gh issue create --title "${title}" --body "${body}"
-          fi
+        uses: $/.github/actions/report-scheduled-failure

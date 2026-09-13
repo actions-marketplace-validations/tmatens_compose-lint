@@ -26,9 +26,19 @@ page is the full contract behind the README's summary.
   rewrite, and every apply is re-parsed and re-linted before it is written —
   anything that wouldn't round-trip clean is refused with the diff surfaced for
   diagnosis.
+- **A key deleted with `!reset` is deferred, not written back.** `!reset`
+  removes the key from the configuration Compose runs, so an absence rule fires
+  on it — but writing the key into a document the reset applies to changes
+  nothing there. That finding is reported as needing manual review, naming the
+  key and the file the `!reset` is written in, and every other fix in the file
+  still applies. The refusal is the finding's, not the file's.
 - **Diff is data, status is human.** The diff goes to stdout; progress and
-  warnings go to stderr, so `compose-lint fix file.yml > changes.diff` captures
-  exactly the patch.
+  counts go to stderr, so `compose-lint fix file.yml > changes.diff` captures
+  the patch without the summary. The `⚠ behavior-changing` lines are the
+  exception: on a dry run they lead the stdout block, above the diff, so a
+  redirect cannot silently drop the one warning that matters — which also
+  means `git apply` needs them stripped first. Under `--apply` there is no
+  diff and they go to stderr with the status.
 
 ## SARIF suggested changes
 

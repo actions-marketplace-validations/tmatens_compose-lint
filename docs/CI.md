@@ -19,7 +19,8 @@ per-channel publish contract see [`DISTRIBUTION.md`](DISTRIBUTION.md).
 | `release-prep.yml`        | Manual (`workflow_dispatch`, maintainer)   | Opens the "Prepare X.Y.Z release" PR                   |
 | `publish-channel.yml`     | Manual (`workflow_dispatch`, maintainer)   | Emergency single-channel publish                       |
 | `marketplace-smoke.yml`   | Push to `main` touching the file + manual + weekly cron | Verifies the published action, pre-commit hook, and the `uvx`/`pipx run` one-shot forms end-to-end |
-| `forgejo-smoke.yml`       | Push to `main` touching the harness + manual + weekly cron | Runs README's Forgejo snippet on a live containerized Forgejo |
+| `forgejo-smoke.yml`       | PRs + pushes to `main` touching the harness + manual + weekly cron | Runs the Forgejo guide's snippet on a live containerized Forgejo |
+| `forgejo-smoke-bump.yml`  | Daily (05:17 UTC) + manual                 | Opens the PR that moves the harness to the newest Forgejo + runner, docs claim included |
 | `os-smoke.yml`            | Called by `ci.yml` on PRs touching code + push to `main` + manual + weekly cron | pytest (3.11 and 3.13) + pre-commit hook on macOS and Windows — **gates via `ci-ok`** |
 | `sarif-ingestion.yml`     | Push to `main` touching SARIF inputs + manual + weekly cron | Uploads a probe SARIF to Code Scanning and asserts GitHub ingested it — then deletes its own alerts |
 
@@ -51,17 +52,20 @@ a suppression, and no duplicate `ruleId`.
 ## PR-time checks — `ci.yml`
 
 Runs on every PR to `main`. All jobs must pass before merge. Concurrency
-cancels in-progress runs when you push new commits to the same PR.
+cancels in-progress runs when you push new commits to the same PR. A push to
+`main` is never cancelled: the ruleset does not require a PR to be up to date
+before merging, so `main`'s own run is what proves the merged result.
 
 | Job                       | Purpose                                                                                   |
 | ------------------------- | ----------------------------------------------------------------------------------------- |
 | `lint`                    | `ruff check` + `ruff format --check` on `src/` and `tests/`                               |
-| `type-check`              | `mypy src/` in strict mode                                                                |
+| `type-check`              | `mypy src/ tests/`; strict on `src/`, relaxed on `tests/`                                  |
 | `test`                    | `pytest` across the Python matrix — 3.11, 3.12, 3.13, 3.14                          |
-| `coverage`                | `pytest --cov` with `--cov-fail-under=80` — fails below 80% statement coverage             |
+| `coverage`                | `pytest --cov` with `--cov-fail-under=80` — fails below 80% statement coverage repo-wide; on a PR, `diff-cover` also fails below 90% coverage of the lines that PR adds or changes (see note) |
 | `security`                | `bandit -r src/ -ll` (blocking) + `pip-audit` for dep CVEs (informational on PRs — see note) |
 | `dependency-review`       | Blocks PRs adding deps with known high-severity CVEs or disallowed licenses               |
-| `actionlint`              | Lints every workflow under `.github/workflows/` (embeds shellcheck for `run:` blocks)     |
+| `actionlint`              | Lints every workflow under `.github/workflows/`: actionlint (embeds shellcheck for `run:` blocks) and zizmor (template injection, cache poisoning, kept tokens, unpinned uses; exceptions in `.github/zizmor.yml`) |
+| `hadolint`                | Lints the Dockerfile with hadolint (only when the Dockerfile changes)                     |
 | `dockerfile-digests`      | Fails if any `FROM @sha256:` in the Dockerfile is a per-arch manifest instead of an index |
 | `docker-smoke`            | Builds `linux/amd64` **and `linux/arm64`** from the Dockerfile on native runners and runs each against fixtures (only when build inputs change) |
 | `action-smoke`            | Runs `./action.yml` against clean and insecure fixtures; asserts exit codes               |
@@ -76,6 +80,53 @@ cancels in-progress runs when you push new commits to the same PR.
 `version-consistency` and `changelog-gate` were added in 0.3.8 to catch
 the historically painful release-bump mistakes at review time rather
 than tag-push time.
+
+### Patch-coverage gate (`diff-cover`)
+
+The `coverage` job runs two gates over one measurement pass.
+
+The **repo-wide floor** (`--cov-fail-under=80`) is what the OpenSSF Best
+Practices Silver `test_statement_coverage80` criterion measures: statement
+coverage across the whole package. It is the trunk's number and is not
+traded away for anything below.
+
+The **patch gate** grades only the lines the PR adds or changes.
+`diff-cover` diffs against the PR's base commit and reads the same
+`coverage.xml` the floor produced, so nothing is measured twice. It exists
+because a floor structurally cannot see a change that adds untested code —
+a handful of new uncovered lines does not move a whole-repo percentage, so
+the floor stays green and the only thing standing between untested code and
+`main` is a checkbox the author ticks about their own work. The threshold is
+90%, deliberately above the floor: new code that has tests lands near 100%,
+and the gap is room for a genuinely untestable line, which takes a
+`# pragma: no cover` and a comment saying why.
+
+It runs on `pull_request` only. A push to `main` has no base to diff
+against, and the floor is the gate that speaks for the aggregate.
+
+A PR that touches only docs, tests or metadata has no measurable line in
+its diff. `diff-cover` reports that and passes — correctly. The problem is
+that it reports exactly the same thing, and passes just as quietly, when
+`coverage.xml` has stopped lining up with the repo: it matches a report path
+against a diff path as text, so a gate that has silently stopped measuring
+anything looks identical to a gate with nothing to measure. That is the
+failure this whole check exists to stop, one level up, so
+`.github/scripts/patch-coverage.py` wraps it with two checks:
+
+- **Every file the report names must exist here, and it must name some.**
+  Runs on every invocation, not only the quiet ones. This is the case that
+  matters: a report written against `compose_lint/cli.py` when the diff says
+  `src/compose_lint/cli.py` matches nothing at all, and no comparison
+  against the diff would notice, because the mismatch makes both sides
+  empty.
+- **When nothing was measured, no line the diff adds may be one the report
+  calls a statement.** This catches line numbers that have drifted from the
+  diff. It is deliberately not claimed as exhaustive — code appended past
+  the report's last statement leaves nothing to intersect — so it backs up
+  the path check rather than standing in for it.
+
+`tests/test_patch_coverage.py` covers both, since a wrong parser there would
+make the guard itself the silent check it exists to prevent.
 
 ### Dependency-CVE gate (`pip-audit`)
 
@@ -138,13 +189,17 @@ gap that storage-repo would close.
 
 ### When a scheduled fuzz run fails
 
-1. GitHub Actions emails the workflow author by default.
+1. The run opens (or comments on) an issue titled `Scheduled run failed:
+   ClusterFuzzLite batch fuzzing (<sanitizer>)`, via the shared
+   `report-scheduled-failure` composite. GitHub also emails the workflow
+   author.
 2. SARIF crashes are uploaded to **Security → Code Scanning**.
 3. The crash reproducer is in the run's artifacts (90-day retention).
 
-No auto-issue filing. Triage happens manually: download the reproducer,
+The issue is the tracker; the fix is manual: download the reproducer,
 reproduce locally with `python fuzz/fuzz_compose.py <file>`, land a fix
-via PR, land the new corpus entry in `fuzz/corpus/` if applicable.
+via PR, land the new corpus entry in `fuzz/corpus/` if applicable, and
+close the issue with the PR.
 
 The `RecursionError` fix in 0.3.5 came from this path.
 
@@ -257,9 +312,14 @@ via `git verify-tag` — the cryptographic root of the release provenance
 chain. Every downstream job inherits the check via `needs:`.
 
 `release-gate` is the single human-in-the-loop gate: one approval on the
-`release` environment covers every channel. Per-channel environments
-(`pypi`, `dockerhub`) add a second required approval before each production
-publish.
+`release` environment covers every channel. The per-channel environments
+(`pypi`, `dockerhub`) carry no reviewer of their own. What they enforce is
+a deployment branch policy — only `v*` tags may enter them — so a job
+reaches a publishing credential only from a tag, and only after
+`verify-tag` has checked that tag's signature against
+`.github/allowed_signers`. The gate is the signed tag plus one approval;
+with a single maintainer, a second approval on the same run would be the
+same person clicking twice.
 
 `build` generates an SPDX SBOM (`sbom.spdx.json`) covering the wheel
 and sdist via `anchore/sbom-action`. `create-release` attaches it to
@@ -277,6 +337,26 @@ authored PR does not trigger `pull_request`/`push` workflows (GitHub's
 recursion guard), so it would land with zero checks and sit blocked
 until someone closed and reopened it. Authoring it as the PAT user makes
 the required checks run automatically.
+
+The job then arms **auto-merge** on that PR, so it lands on its own once
+`ci-ok` is green. The merge gates nothing irreversible: the PR opens only
+after `publish`, `docker-publish` and `create-release` have all succeeded,
+so PyPI, Docker Hub and the GitHub Release are already permanent by the
+time it exists — the `release` environment approval upstream is the
+control, and it happened before any of that. The pinned SHA is
+`git rev-parse "${TAG}^{commit}"` computed in the job, so it is right by
+construction rather than by inspection. Auto-merge needs **Allow
+auto-merge** enabled on the repository; without it the step warns, the PR
+waits for a manual merge, and the release is otherwise unaffected — it is
+deliberately not a job failure, since the release has already shipped and
+a red X would misreport that.
+
+What this removes is a step that could be *forgotten*, which is the
+failure this job exists to prevent: v0.14.1 shipped with the README
+snippet still pinned to v0.14.0. What it does not remove is the check on
+the result — a post-release smoke failure now opens an issue (see
+`marketplace-smoke.yml` below), which is what made automerging safe to
+turn on.
 
 Merging that PR is what triggers `marketplace-smoke.yml` — deliberately,
 so the smoke runs against the release just cut. It also means the smoke
@@ -323,7 +403,8 @@ Like the marketplace-pin job, this PR is authored with the
 that job it falls back to `GITHUB_TOKEN` when the secret is absent
 (release-prep touches no `.github/workflows/*` file, so the token still
 works) — but the fallback PR lands check-less and needs a manual
-close+reopen, so keep the secret configured.
+close+reopen, so keep the secret configured. `forgejo-smoke-bump.yml`
+uses the secret the same way, with the same fallback.
 
 The signed annotated tag is **not** created here. Tag creation stays
 manual because (a) `GITHUB_TOKEN`-created tags don't trigger downstream
@@ -333,9 +414,12 @@ provenance chain. See `RELEASING.md`.
 ### `publish-channel.yml`
 
 Emergency escape hatch when one channel's smoke is broken and another
-must ship. Enter the tag and the channel (`pypi` or `docker`). Bypasses
-the shared `release-gate` but still requires the per-channel environment
-approval.
+must ship. Dispatch it **from the tag** (the environments admit `v*` tags
+only), then enter the tag and the channel (`pypi` or `docker`). Bypasses
+the shared `release-gate`. There is no approval click on this path: what
+remains is `verify-tag` — the tag must be signed by a key in
+`.github/allowed_signers` — and the environments' tags-only policy. The
+signature, not a click, is the control.
 
 Both paths re-apply the `verify-tag` check (annotated + reachable from
 `origin/main`) inline — the emergency route doesn't skip supply-chain
@@ -362,7 +446,7 @@ the Marketplace, and the pre-commit hook as
 `repo: https://github.com/tmatens/compose-lint` pinned at a release tag
 (the `precommit-published-smoke` job, added for issue #570). Unlike
 `ci.yml`'s `action-smoke` and `precommit-smoke` jobs (which use the
-working tree via `./` and `try-repo`), these catch regressions at the
+tree under test via `$/` and `try-repo`), these catch regressions at the
 publish boundary: a missing or broken tag, a packaging regression, a
 broken published `action.yml`, a PyPI outage during install.
 
@@ -374,6 +458,15 @@ triggerable from the Actions tab for ad-hoc re-verification, and runs
 weekly on a schedule so a regression that develops *between* releases
 (a yanked dependency, a resolver change, a registry-side issue) is
 noticed before a user's workflow breaks.
+
+Both unattended triggers — the weekly cron and the post-release push —
+open an issue on failure via `report-failure`. The push leg is the one
+that matters most and was added last: by the time it runs, the release
+has already shipped to PyPI, Docker Hub and GitHub Releases, so there is
+no gate left to fail closed and nothing else would say so. It was
+covered only by whoever merged the pin PR happening to watch the run,
+which stopped being a person when that PR started automerging. A manual
+`workflow_dispatch` opens no issue: someone set it off and is watching.
 
 ### `forgejo-smoke.yml`
 
@@ -389,12 +482,49 @@ and requires success. It then asserts the README's verified-on versions
 against the live instance and runner, so bumping the harness images
 without moving the claim (or vice versa) fails the run.
 
-Runs weekly, on pushes to `main` touching the harness — which includes
-Renovate bumps of the Forgejo/runner images, so each Forgejo release
-re-proves the snippet — and manually. Deliberately not on README PRs:
+Runs weekly, on PRs and pushes to `main` touching the harness — which is
+how each Forgejo release re-proves the snippet: the bump PR below carries
+this run as its check — and manually. Deliberately not on docs-only PRs:
 the release-prep PR bumps the snippet's `compose-lint==X.Y.Z` pin before
 that version exists on PyPI, which would fail spuriously; the weekly run
 covers the new pin after release instead.
+
+### `forgejo-smoke-bump.yml`
+
+Opens the PR that moves the harness to the newest Forgejo and runner
+releases. It has to be two files or nothing: the image pins in
+`scripts/forgejo_smoke/compose-forgejo-smoke.yml` **and** the "Verified on
+Forgejo X, runner Y" line in `docs/forgejo.md`, because `forgejo-smoke.yml`
+asserts the two agree — which is also why Renovate could never do this
+bump even where it can see the file (it cannot move the docs line). And
+it cannot see the file: the hosted Renovate fails to look up either
+registry (`Failed to look up docker package codeberg.org/forgejo/forgejo:
+no-result`, likewise `data.forgejo.org/forgejo/runner`, plus `Error
+obtaining docker token`) while a local `renovate --platform=local
+--dry-run=lookup` resolves both, so the failure is the hosted runner's
+egress. `renovate.json` disables the docker-compose manager on that file
+so two writers never race on one pin.
+
+Daily rather than weekly because Codeberg deletes a superseded Forgejo
+patch tag — digest included — within days of the next patch ([#746]);
+the old pin is on the clock from the moment a release ships.
+
+`scripts/forgejo_smoke_bump.py` is three-valued like `eol_watch.py`: 0
+nothing to do, 1 files rewritten (the job commits them, one branch per
+target version pair, and never reopens a pair a human has already closed),
+2 no trustworthy answer — a registry unreachable, an anchor gone from
+either file, or a tag resolving to a per-architecture manifest instead of
+a manifest list — which fails the run and is reported as an issue. Policy:
+the newest stable `X.Y.Z` of each image, never a `-rootless` variant or a
+floating `16`/`16.0` tag. A major that breaks the guide's snippet surfaces
+as a red `Forgejo smoke test` check on the bump PR, which is the review;
+merging stays manual.
+
+The PR is authored with `MARKETPLACE_SMOKE_PAT` (see below) so its checks
+run; without the secret it falls back to `GITHUB_TOKEN` and lands
+check-less, like `release-prep.yml`.
+
+[#746]: https://github.com/tmatens/compose-lint/issues/746
 
 ### `os-smoke.yml`
 
@@ -438,8 +568,9 @@ condition.
 | Scorecard finding                   | Security → Code Scanning (`scorecard` category)        |
 | Docker Scout CVE                    | Security → Code Scanning (`docker-scout` category)     |
 | Vulnerability with an available fix | Rolling issue labelled `fixable-vulns`                 |
-| Scheduled workflow failure          | Email to workflow author + red X on Actions tab        |
-| Renovate PR                         | Opens a PR tagged accordingly                          |
+| Scheduled workflow failure          | Issue `Scheduled run failed: <workflow>` — one per workflow, repeat failures comment on it (`.github/actions/report-scheduled-failure`); plus the author email and red X |
+| Post-release smoke failure          | Issue `Post-release run failed: Marketplace smoke test` — same action, separate thread from the weekly one so a break in a shipped release is not triaged as a flake |
+| Renovate PR                         | Opens a PR tagged accordingly; patch, pin, digest and lock-maintenance bumps automerge once green **and** the release is three days old (`renovate/stability-days` stays pending until then) |
 
 The Security tab is the single pane of glass for everything except
 PR-gating failures (which stay on the PR) and Renovate bumps (which

@@ -50,8 +50,8 @@ from compose_lint.parser import (
     ComposeError,
     ComposeFileError,
     ComposeNotApplicableError,
-    coverage_gaps,
     load_compose,
+    load_compose_full,
     load_merged,
     merge_patched,
     unresolved_mount_sources,
@@ -126,9 +126,7 @@ def _note_env_not_read(selection: Selection) -> None:
         )
 
 
-def _attribute_sources(
-    findings: list[Finding], merged: Merged, primary: str
-) -> list[Finding]:
+def _attribute_sources(findings: list[Finding], primary: str) -> list[Finding]:
     """Tag each finding with the merged file its evidence was written in.
 
     Exact, not inferred: the line number a rule looked up is a
@@ -215,7 +213,7 @@ def _subcommands() -> set[str]:
 
 
 def _add_check_subparser(
-    subparsers: argparse._SubParsersAction,  # type: ignore[type-arg]
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
     """Register the `check` subcommand (the default lint operation)."""
     check = subparsers.add_parser(
@@ -257,9 +255,9 @@ def _add_check_subparser(
         action="store_true",
         default=False,
         help=(
-            "treat config diagnostics (unknown/typo'd rule id, unknown key) as "
-            "errors instead of stderr warnings, so a malformed config fails "
-            "loudly rather than silently disabling the wrong rule"
+            "treat config diagnostics (unknown/typo'd rule id, unknown key, an "
+            "inert reason) as errors instead of stderr warnings, so a malformed "
+            "config fails loudly rather than silently disabling the wrong rule"
         ),
     )
     check.add_argument(
@@ -349,7 +347,7 @@ def _add_check_subparser(
 
 
 def _add_fix_subparser(
-    subparsers: argparse._SubParsersAction,  # type: ignore[type-arg]
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
     """Register the `fix` subcommand (ADR-014).
 
@@ -420,14 +418,14 @@ def _add_fix_subparser(
         action="store_true",
         default=False,
         help=(
-            "treat config diagnostics (unknown/typo'd rule id, unknown key) as "
-            "errors instead of stderr warnings"
+            "treat config diagnostics (unknown/typo'd rule id, unknown key, an "
+            "inert reason) as errors instead of stderr warnings"
         ),
     )
 
 
 def _add_init_subparser(
-    subparsers: argparse._SubParsersAction,  # type: ignore[type-arg]
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
     """Register the `init` subcommand (ADR-011).
 
@@ -670,8 +668,23 @@ def main(argv: list[str] | None = None) -> NoReturn:
         raise
 
 
+# The remedy sentence appended to every coverage gap, per command. ``check``
+# can accept the gap with a flag; ``fix`` has no such flag — it never fails on
+# a gap, so there is nothing to accept — and telling it to pass one sent users
+# to an argument the subcommand rejects (#779). What ``fix`` needs to hear is
+# that the unseen part was not fixed either.
+_CHECK_GAP_REMEDY = (
+    "Lint the merged output (docker compose config) to cover the gap, or pass "
+    "--allow-partial-coverage to accept it."
+)
+_FIX_GAP_REMEDY = (
+    "What was not seen was not fixed. Lint the merged output "
+    "(docker compose config) to cover the gap."
+)
+
+
 def _report_coverage_gaps(
-    filepath: str, data: dict[str, Any], *, fatal: bool
+    filepath: str, gaps: tuple[str, ...], *, fatal: bool, remedy: str
 ) -> list[tuple[str, str]]:
     """Report parts of ``filepath`` that were not linted; return them if fatal.
 
@@ -686,14 +699,23 @@ def _report_coverage_gaps(
     ``errors[]`` and SARIF ``toolExecutionNotifications`` and force exit 2.
     With ``--allow-partial-coverage`` the gap is stated on stderr and the run
     is graded on what could be seen.
+
+    ``remedy`` is the caller's closing sentence, so the advice names only
+    what that command can actually do.
+
+    ``gaps`` comes from the parser rather than from the document, because
+    since ADR-036 the document cannot answer the question: whether an
+    ``include:`` or ``extends: {file: ...}`` is a gap depends on where its path
+    resolved and whether the target was readable, and only the pass that tried
+    to follow it knows.
     """
-    gaps = coverage_gaps(data)
-    if not gaps:
+    messages = [f"{gap} {remedy}" for gap in gaps]
+    if not messages:
         return []
     label = "Error" if fatal else "Warning"
-    for gap in gaps:
-        emit(f"{label}: {filepath}: {gap}")
-    return [(filepath, gap) for gap in gaps] if fatal else []
+    for message in messages:
+        emit(f"{label}: {filepath}: {message}")
+    return [(filepath, message) for message in messages] if fatal else []
 
 
 def _exit_2_with_envelope(args: argparse.Namespace, message: str) -> NoReturn:
@@ -734,8 +756,16 @@ def _run_check(args: argparse.Namespace) -> NoReturn:
         try:
             canonical = normalize_rule_id(args.explain)
             doc = load_rule_doc(canonical)
-        except UnknownRuleError:
-            emit(f"Error: unknown rule id '{args.explain}' (expected format: CL-XXXX)")
+        except UnknownRuleError as exc:
+            if exc.kind == "malformed":
+                emit(
+                    f"Error: unknown rule id '{args.explain}' "
+                    "(expected format: CL-XXXX)"
+                )
+            elif exc.kind == "retired":
+                emit(f"Error: rule {exc.rule_id} was retired and is not reused")
+            else:
+                emit(f"Error: unknown rule id '{exc.rule_id}'")
             sys.exit(2)
         if args.no_pager or not _page_rule_doc(doc, canonical):
             _stdout_print(doc)
@@ -801,7 +831,7 @@ def _run_check(args: argparse.Namespace) -> NoReturn:
         try:
             if overlays:
                 merged = load_merged([filepath, *overlays], use_env=not args.no_env)
-                data, lines = merged.data, merged.lines
+                data, lines, gaps = merged.data, merged.lines, merged.gaps
                 # Not a coverage gap — coverage was achieved, not missed — so
                 # this warns without touching the exit code. What it must never
                 # do is stay silent: the findings below describe a document that
@@ -824,7 +854,8 @@ def _run_check(args: argparse.Namespace) -> NoReturn:
                     "configuration."
                 )
             else:
-                data, lines = load_compose(filepath, use_env=not args.no_env)
+                loaded = load_compose_full(filepath, use_env=not args.no_env)
+                data, lines, gaps = loaded.data, loaded.lines, loaded.gaps
         except ComposeNotApplicableError as e:
             # v1 / fragment file: not malformed, just outside what we lint.
             # Per ADR-013 this is exit 0 (skipped, not a parse error). Must
@@ -837,7 +868,12 @@ def _run_check(args: argparse.Namespace) -> NoReturn:
             continue
 
         coverage_errors.extend(
-            _report_coverage_gaps(filepath, data, fatal=not args.allow_partial_coverage)
+            _report_coverage_gaps(
+                filepath,
+                gaps,
+                fatal=not args.allow_partial_coverage,
+                remedy=_CHECK_GAP_REMEDY,
+            )
         )
         for note in unresolved_mount_sources(data):
             emit(f"note: {filepath}: {note}")
@@ -875,8 +911,10 @@ def _run_check(args: argparse.Namespace) -> NoReturn:
             on_error=_record_rule_error,
             env_files=service_env_files,
         )
-        if merged is not None:
-            findings = _attribute_sources(findings, merged, filepath)
+        # Also on the single-file path: a resolved cross-file `extends:` puts
+        # lines from another document into this one's map, so a finding can be
+        # written in a file the report is not headed by even with no overlay.
+        findings = _attribute_sources(findings, filepath)
 
         if args.skip_suppressed:
             findings = [f for f in findings if not f.suppressed]
@@ -1194,13 +1232,19 @@ def _run_fix(args: argparse.Namespace) -> NoReturn:
         try:
             if overlays:
                 merged = load_merged([filepath, *overlays], use_env=not args.no_env)
-                data, lines = merged.data, merged.lines
+                data, lines, gaps = merged.data, merged.lines, merged.gaps
+                resets = merged.resets
                 emit(
                     f"note: {filepath}: merged {', '.join(overlays)} before "
                     "linting. Only findings written in this file can be fixed here."
                 )
             else:
-                data, lines = load_compose(filepath, use_env=not args.no_env)
+                loaded = load_compose_full(filepath, use_env=not args.no_env)
+                data, lines, gaps = loaded.data, loaded.lines, loaded.gaps
+                # A `!reset` needs no second document to matter: it deletes the
+                # key from this file's own parsed data, and the key is still
+                # written here for a fixer's insertion to collide with.
+                resets = loaded.resets
         except ComposeNotApplicableError as e:
             # v1 / fragment file: skipped, not an error (ADR-013). Must precede
             # the ComposeError clause below — it is a subclass.
@@ -1211,7 +1255,7 @@ def _run_fix(args: argparse.Namespace) -> NoReturn:
             had_error = True
             continue
 
-        _report_coverage_gaps(filepath, data, fatal=False)
+        _report_coverage_gaps(filepath, gaps, fatal=False, remedy=_FIX_GAP_REMEDY)
 
         try:
             # newline="" preserves the file's original line endings: read_text's
@@ -1244,20 +1288,34 @@ def _run_fix(args: argparse.Namespace) -> NoReturn:
             return origin is None or Path(origin).absolute() == Path(_path).absolute()
 
         fixable_findings = [f for f in findings if _is_local(f)]
-        deferred = len(findings) - len(fixable_findings)
+        deferred = [f for f in findings if not _is_local(f)]
         if deferred:
+            # Named from the findings themselves, not from `overlays`: since
+            # ADR-036 a finding can come from a document this file `extends:`
+            # rather than from an overlay merged beside it, and the overlay
+            # list is empty in that case — which printed the sentence with a
+            # blank where the file should be.
+            origins = sorted({str(getattr(f.line, "source", "")) for f in deferred})
             emit(
-                f"{filepath}: {deferred} finding(s) come from "
-                f"{', '.join(overlays or [])} and need manual review there"
+                f"{filepath}: {len(deferred)} finding(s) come from "
+                f"{', '.join(origins)} and need manual review there"
             )
         try:
-            result = collect_edits(fixable_findings, data, lines, text, only=only)
+            result = collect_edits(
+                fixable_findings, data, lines, text, only=only, resets=resets
+            )
         except LineOutOfRangeError as e:
             # Same fail-closed treatment as the check path: refuse this file,
             # write nothing, let the rest of the batch run (VULN-017).
             emit(f"Error: {filepath}: could not compute fixes: {e}")
             had_error = True
             continue
+
+        # Emitted before the edits are weighed so the reason survives every
+        # path below: a refusal a count cannot explain is the one the user has
+        # to be told about, whether or not anything else in the file was fixed.
+        for note in result.notes:
+            emit(f"{filepath}: {note}")
 
         if not result.edits:
             if result.manual:
@@ -1310,7 +1368,12 @@ def _run_fix(args: argparse.Namespace) -> NoReturn:
             # checked. Verifying the patched base alone would compare a
             # single-file result against a merged one.
             reparse=_merged_reparser(filepath, overlays, use_env=not args.no_env),
-            fixable=_is_local if overlays else None,
+            # Unconditional, like the edit pass above: since ADR-036 a document
+            # merges others through `include:` and cross-file `extends:` with no
+            # overlay at all, and `_is_local` answers from the finding's own
+            # source file rather than from how the document was assembled.
+            fixable=_is_local,
+            resets=resets,
         )
         if verify_error is not None:
             emit_block(render_file_diff(filepath, text, patched, result.caveats))

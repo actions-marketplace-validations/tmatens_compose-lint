@@ -19,9 +19,9 @@ jobs:
         run: |
           apt-get update -qq
           apt-get install -yqq --no-install-recommends python3-pip
-          pip3 install --break-system-packages --no-cache-dir compose-lint==0.26.0
+          pip3 install --break-system-packages --no-cache-dir compose-lint==0.29.0
       - name: Run compose-lint
         run: compose-lint --fail-on high
 ```
 
-Forgejo has no SARIF UI today — `--format sarif` still produces a valid document, but there's no security-tab equivalent to render it. Verified on Forgejo 16.0.3, runner 13.0.0 — this exact snippet is executed against a live Forgejo weekly by the [forgejo-smoke workflow](https://github.com/tmatens/compose-lint/blob/main/.github/workflows/forgejo-smoke.yml), which fails if this line and the versions it ran on disagree.
+Forgejo has no SARIF UI today — `--format sarif` still produces a valid document, but there's no security-tab equivalent to render it. Verified on Forgejo 16.0.4, runner 13.1.0 — this exact snippet is executed against a live Forgejo weekly by the [forgejo-smoke workflow](https://github.com/tmatens/compose-lint/blob/main/.github/workflows/forgejo-smoke.yml), which fails if this line and the versions it ran on disagree.

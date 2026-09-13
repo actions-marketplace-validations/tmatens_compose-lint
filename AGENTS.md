@@ -18,7 +18,7 @@ CRITICAL > HIGH > MEDIUM > LOW. A rule's severity is **derived**, not chosen: it
 
 - 0: No findings at/above threshold
 - 1: Findings at/above threshold
-- 2: Usage error (bad args, file not found, invalid Compose) **or a coverage gap** — unresolved `include:` / cross-file `extends:`, where part of the stack was never linted. `--allow-partial-coverage` downgrades the gap to a stderr warning. `fix` reports gaps but never fails on them; it is not the gate.
+- 2: Usage error (bad args, file not found, invalid Compose) **or a coverage gap** — an `include:` or cross-file `extends:` that could not be followed (leaves the project directory, missing, interpolated, a cycle, unreadable), where part of the stack was never linted. One resolving inside the project is merged rather than refused (ADR-036); an include-only file whose references all fail is still a parse error, not a downgradable gap (#516). `--allow-partial-coverage` downgrades the gap to a stderr warning. `fix` reports gaps but never fails on them; it is not the gate.
 - Default threshold: HIGH. Configurable via `--fail-on`.
 
 ## CLI output
@@ -31,7 +31,14 @@ Disables still produce suppressed findings. `reason` flows to `suppression_reaso
 
 ## Quality checks
 
-`ruff check src/ tests/`, `ruff format --check src/ tests/`, `mypy src/` (strict), `pytest`. All four must pass, scoped exactly as written — CI lints only `src/` and `tests/`, and a bare `ruff check` also sweeps `scripts/`, which has known, accepted violations. CI test matrix: Python 3.11–3.14 on ubuntu-24.04.
+`ruff check src/ tests/`, `ruff format --check src/ tests/`, `mypy src/ tests/` (strict on `src/`, relaxed on `tests/`), `pytest`. All four must pass, scoped exactly as written — CI lints only `src/` and `tests/`, and a bare `ruff check` also sweeps `scripts/`, which has known, accepted violations. CI test matrix: Python 3.11–3.14 on ubuntu-24.04.
+
+Coverage is gated twice in the `coverage` job: >= 80% statements repo-wide (the
+OpenSSF Silver criterion), and >= 90% of the lines a PR adds or changes
+(`diff-cover`, PRs only). The second is what catches a change that ships
+untested code — a floor cannot, since a few new uncovered lines do not move a
+whole-repo percentage. A genuinely untestable line takes `# pragma: no cover`
+with a reason, not a lower threshold. See `docs/CI.md`.
 
 Running a branch's tests from a `git worktree` needs `PYTHONPATH` pointed at that worktree's `src/`. The dev install is editable and resolves `compose_lint` to the **main checkout's** `src/`, so a bare `pytest` in a worktree grades the branch's tests against `main`'s source and fails in exactly the way a genuinely broken change would. Confirm with `python -c 'import compose_lint; print(compose_lint.__file__)'` before believing a red run.
 
@@ -45,7 +52,8 @@ A new rule also needs its derivation block (with an **Evidence** line naming the
 
 CONTRIBUTING.md is the source of truth for commits, signing, and PRs. Key points:
 - One logical change per commit, imperative subject under 72 chars, no Conventional Commits prefixes
-- All commits signed (SSH). Verify with `git log --format='%h %G? %s'` — every commit shows `G`
+- All commits signed off (DCO, required); signing is recommended, not required — `main` is signed by GitHub on every squash-merge. `scripts/preflight.sh` checks both, plus every other gate CI runs; `%G?` alone reports `N` for a correctly signed commit wherever git cannot verify the key locally
+- Conventions reviews ask for that no test states are listed in CONTRIBUTING.md "Conventions the diff won't show you"
 - All changes go through a PR, squash-merge to main
 - Maintainer side of an outside contribution — approving fork CI, review states, pre-merge checks — is `docs/MAINTAINING.md`
 - Releases: follow `docs/RELEASING.md` checklist — version lives in both `pyproject.toml` and `src/compose_lint/__init__.py`
@@ -53,8 +61,11 @@ CONTRIBUTING.md is the source of truth for commits, signing, and PRs. Key points
 ## Rule docs (docs/rules/)
 
 - H1 format: `# CL-XXXX: <directive> — <symptom phrasing>` (query-phrased, id first).
-  The docs-site `<title>` comes from the matching nav label in `mkdocs.yml` — keep
-  both in sync. `tests/test_cli.py` pins CL-0003's H1; update it if that changes.
+  The docs-site `<title>` is derived from the matching nav label in `mkdocs.yml` by
+  `scripts/mkdocs_seo_hook.py`, which moves the rule id to the **end** so the
+  searchable phrasing leads in a search result. The H1 and the nav label both keep
+  the id first and still need to stay in sync with each other.
+  `tests/test_cli.py` pins CL-0003's H1; update it if that changes.
 - "Reading the failure" symptom tables quote **verbatim, live-captured** error
   strings. Busybox wordings must be re-proven by a mapping check in
   `scripts/validate_rule_premises.py` (see the ADR-016 amendment); other wordings
@@ -69,7 +80,7 @@ CONTRIBUTING.md is the source of truth for commits, signing, and PRs. Key points
 
 Pin everything to an immutable ref. Renovate bumps the pins.
 
-- **GitHub Actions**: SHA-pin every `uses:` (including first-party). Tag in trailing comment. Only exception: `uses: ./`.
+- **GitHub Actions**: SHA-pin every `uses:` (including first-party). Tag in trailing comment. Only exception: `uses: $/…` self-repository references, which GitHub treats as pinned (they resolve at the running commit); never `uses: ./`, which runs whatever is in the workspace and which zizmor's `self-repository` audit rejects. Enforced twice: the repository setting *Require actions to be pinned to a full-length commit SHA* refuses to start a run with an unpinned `uses:` on any branch, and zizmor's `unpinned-uses` audit fails the `actionlint` job on a PR.
 - **Runtime deps**: SemVer ranges (this is a library — exact pins break downstream resolvers). Lower bound = tested minimum. No upper bound unless we've observed a break.
 - **Dev deps + CI installs**: Hash-pinned lockfiles. Every `pip install` in CI uses `pip install --require-hashes -r requirements{,-dev}.lock`. No ad-hoc `pip install pkg==X.Y.Z` in workflows. One exception: `python -m pip install --upgrade pip` bootstrap in security-scan job.
 - **Docker base images**: Digest-pin if we ever add a Dockerfile.
@@ -124,5 +135,9 @@ Prose that states how many rules there are is a different kind of pin: it goes s
 - No rules without authoritative grounding
 - No unactionable findings
 - No inline suppression syntax unless explicitly planned
-- No private/internal tooling references in a public repo
+- No private context in a public artifact. Issues, PRs, commit messages and docs
+  publish as written, and this project's tracker is public. Not only internal
+  tooling: private repo names, commit SHAs, CI run numbers, and the service, file
+  and host names of a private deployment. Generalize evidence before it crosses —
+  the finding travels, the provenance does not
 - No mutable refs in CI (see pinning section above)

@@ -204,6 +204,10 @@ class Document:
     # accumulator a mixture, and attributing all of it to a single `path`
     # credited the first document with values the second supplied.
     sources: dict[str, str] | None = None
+    # References inside this document that could not be followed, one message
+    # each (ADR-036 decision 7). Carried here so a merge set reports the gaps
+    # of every document in it, not only the primary's.
+    gaps: tuple[str, ...] = ()
 
 
 @dataclass
@@ -213,6 +217,13 @@ class Merged:
     data: dict[str, Any]
     lines: dict[str, int] = field(default_factory=dict)
     sources: dict[str, str] = field(default_factory=dict)
+    gaps: tuple[str, ...] = ()
+    # Dotted paths some document in the set deleted with `!reset`, each naming
+    # the file that asked for the deletion. The key is absent from `data`, so
+    # an absence rule fires on it and its fixer would write it back — into a
+    # document where the reset deletes it again. `fix` reads this to defer that
+    # finding instead of refusing the file it appears in.
+    resets: dict[str, str] = field(default_factory=dict)
 
     def source_of(self, path: str) -> str | None:
         return self.sources.get(path)
@@ -348,13 +359,14 @@ def merge_values(
         )
 
     # Key/value fields accept a list *or* a mapping, and Compose merges the two
-    # forms together by name. Normalise the odd side into the other's shape.
-    if field_name in _KEY_VALUE_SEQ and isinstance(base, (list, dict)):
-        if isinstance(base, dict) and isinstance(over, list):
-            return _merge_kv_mixed(base, over, base_side, over_side, out_path, rec)
-        if isinstance(base, list) and isinstance(over, dict):
-            return _merge_kv_mixed_list_base(
-                base, over, base_side, over_side, out_path, rec
+    # forms together by name, in the mapping shape.
+    if field_name in _KEY_VALUE_SEQ:
+        mixed = (isinstance(base, dict) and isinstance(over, list)) or (
+            isinstance(base, list) and isinstance(over, dict)
+        )
+        if mixed:
+            return _merge_kv_forms(
+                base, over, field_name, base_side, over_side, out_path, rec
             )
 
     # Scalars, and every type mismatch: the overriding document wins outright.
@@ -533,42 +545,98 @@ def _merge_appended(
     return result
 
 
-def _merge_kv_mixed(
-    base: dict[str, Any],
-    over: list[Any],
+def _merge_kv_forms(
+    base: list[Any] | dict[str, Any],
+    over: list[Any] | dict[str, Any],
+    field_name: str,
     base_side: _Side | None,
     over_side: _Side | None,
     out_path: str,
     rec: _Recorder | None,
 ) -> dict[str, Any]:
-    """Mapping base, list override: fold the list's entries in by name."""
-    merged = dict(base)
-    for i, entry in enumerate(over):
-        name = _kv_name(entry)
-        if name is None:
-            continue
-        _, sep, value = str(entry).partition("=")
-        merged[name] = value if sep else None
-        if rec is not None and over_side is not None:
-            rec.take(_join(out_path, name), _index(over_side, i))
-    if rec is not None and base_side is not None:
-        for key in base:
-            if key not in {_kv_name(e) for e in over}:
-                rec.take_subtree(_join(out_path, key), _child(base_side, key))
+    """One side a list, the other a mapping: merge in the mapping shape.
+
+    Compose expands the list spelling to the mapping it is sugar for, on both
+    sides, and then merges by name. Doing the same here is not just tidier than
+    flattening the mapping back into ``K=V`` strings — it is the only thing that
+    works. ``depends_on``'s mapping values are themselves mappings, and
+    rendering one with ``str()`` produced a list entry that was a Python repr:
+    ``["db={'condition': 'service_healthy'}"]`` where Compose resolves
+    ``{db: {condition: service_healthy, required: true}}``. The same defect in
+    milder form reached every typed value, ``environment: {DEBUG: true}``
+    arriving as ``DEBUG=True`` rather than Compose's ``DEBUG: "true"``.
+
+    The result is a mapping even when the file wrote a list, which is the one
+    place this module normalises. It is confined to the mixed-form case — a
+    document whose overlay uses the same spelling it does keeps that spelling —
+    and no rule is sensitive to it: the two that read ``environment`` go through
+    ``_iter_env``, which accepts either form and reports the key name.
+    """
+    base_map, base_sides = _kv_sides(base, field_name, base_side)
+    over_map, over_sides = _kv_sides(over, field_name, over_side)
+
+    merged = dict(base_map)
+    for name, value in over_map.items():
+        prior = merged.get(name)
+        # Long-form entries (only `depends_on` has any) merge key by key, so an
+        # overlay naming just `condition:` keeps the base's `required:`. The
+        # values are flat, so one level is the whole of it.
+        merged[name] = (
+            {**prior, **value}
+            if isinstance(prior, dict) and isinstance(value, dict)
+            else value
+        )
+
+    if rec is not None:
+        for name in merged:
+            # Base first, then the override, so a key both sides mention keeps
+            # the overriding document's provenance where it actually won.
+            rec.take_subtree(_join(out_path, name), base_sides.get(name))
+            rec.take_subtree(_join(out_path, name), over_sides.get(name))
     return merged
 
 
-def _merge_kv_mixed_list_base(
-    base: list[Any],
-    over: dict[str, Any],
-    base_side: _Side | None,
-    over_side: _Side | None,
-    out_path: str,
-    rec: _Recorder | None,
-) -> list[Any]:
-    """List base, mapping override: keep the list shape the file already uses."""
-    as_list = [f"{k}={v}" if v is not None else str(k) for k, v in over.items()]
-    return _merge_keyed(base, as_list, _kv_name, base_side, over_side, out_path, rec)
+def _kv_sides(
+    value: list[Any] | dict[str, Any],
+    field_name: str,
+    side: _Side | None,
+) -> tuple[dict[str, Any], dict[str, _Side]]:
+    """Canonicalise one key/value side to a mapping, plus a side per name.
+
+    The provenance sides are returned separately because the canonical mapping's
+    paths and the document's paths differ for the list spelling: entry ``0`` of
+    ``services.web.environment`` supplies ``services.web.environment.A``.
+    """
+    if isinstance(value, dict):
+        sides = {} if side is None else {k: _child(side, k) for k in value}
+        return dict(value), {k: s for k, s in sides.items() if s is not None}
+
+    mapping: dict[str, Any] = {}
+    list_sides: dict[str, _Side] = {}
+    for i, entry in enumerate(value):
+        name = _kv_name(entry)
+        if name is None:
+            continue
+        mapping[name] = _kv_short_value(field_name, entry)
+        if side is not None:
+            list_sides[name] = _index(side, i)
+    return mapping, list_sides
+
+
+def _kv_short_value(field_name: str, entry: Any) -> Any:
+    """What one list entry means once Compose has expanded the short spelling."""
+    if field_name == "depends_on":
+        # `- db` is sugar for the full long-form entry, both defaults included.
+        # That is why an overriding short list resets `required:` rather than
+        # leaving the base's: measured against Compose 5.5.0, a base of
+        # `{db: {condition: service_healthy, required: false}}` under an overlay
+        # of `[db]` resolves to `{condition: service_started, required: true}`.
+        # A bare name is also the only spelling — `{db: null}` is rejected
+        # outright ("services.web.depends_on.db must be a mapping").
+        return {"condition": "service_started", "required": True}
+    _, sep, text = str(entry).partition("=")
+    # A bare `FOO` passes the host's value through and has no value of its own.
+    return text if sep else None
 
 
 def _record_items(
@@ -653,4 +721,49 @@ def merge_documents(documents: list[Document]) -> Merged:
         rec.sources = carried
         accumulated = acc_doc
 
-    return Merged(data=merged_data, lines=rec.lines, sources=rec.sources)
+    gaps = tuple(gap for document in documents for gap in document.gaps)
+    # Later documents win, matching the fold: two documents resetting the same
+    # path leave the last one named.
+    resets = {path: document.path for document in documents for path in document.resets}
+    return Merged(
+        data=merged_data,
+        lines=rec.lines,
+        sources=rec.sources,
+        gaps=gaps,
+        resets=resets,
+    )
+
+
+def merge_service_from(
+    base: Document,
+    base_service: str,
+    child: Document,
+    child_service: str,
+) -> tuple[Any, dict[str, int], dict[str, str]]:
+    """Merge a service written in another document under ``child_service``.
+
+    The cross-file ``extends:`` counterpart of :func:`merge_documents`, and the
+    reason that function's provenance machinery is reused rather than
+    reimplemented: an inherited key's line number belongs to the *base* file,
+    and a sequence Compose append-merges moves every index, so re-keying by
+    hand is exactly the ambiguity :class:`SourcedLine` exists to remove.
+
+    Returns the merged service config plus the line and source maps for it,
+    keyed on the merged document's paths (``services.<child_service>...``).
+    The caller folds those into the document's own maps; keys the child
+    supplies keep the child's lines, which is what the merge already records.
+    """
+    base_path = f"services.{base_service}"
+    child_path = f"services.{child_service}"
+    base_value = base.data.get("services", {}).get(base_service)
+    child_value = child.data.get("services", {}).get(child_service)
+    rec = _Recorder()
+    merged = merge_values(
+        base_value,
+        child_value,
+        base_side=_Side(base_value, base, base_path),
+        over_side=_Side(child_value, child, child_path),
+        out_path=child_path,
+        rec=rec,
+    )
+    return merged, rec.lines, rec.sources

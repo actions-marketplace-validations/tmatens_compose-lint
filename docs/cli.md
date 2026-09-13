@@ -17,14 +17,14 @@ check options:
   -q, --quiet                  One line per finding — no fix, reference, or excerpt (text mode)
   --skip-suppressed            Hide suppressed findings from output
   --allow-partial-coverage     Grade a file whose `include:` / cross-file `extends:`
-                               could not be resolved, instead of failing (exit 2)
+                               could not be followed, instead of failing (exit 2)
   --no-merge-overrides         Lint each file alone instead of merging the
                                `compose.override.yml` Compose merges beside it
   --no-env                     Ignore a `.env` sitting beside the Compose file,
                                which Compose reads for COMPOSE_FILE and for
                                `${VAR}` values
   --config PATH                Path to config file (default: .compose-lint.yml)
-  --strict-config              Treat config diagnostics (unknown rule id or key) as errors, not warnings
+  --strict-config              Treat config diagnostics (unknown rule id or key, inert reason) as errors, not warnings
   --explain CL-XXXX            Print the full documentation for a single rule
                                (through a pager on an interactive terminal)
   --no-pager                   Print --explain output directly, bypassing the pager
@@ -37,7 +37,7 @@ fix options:
                                `compose.override.yml` Compose merges beside it
   --no-env                     Ignore a `.env` sitting beside the Compose file
   --config PATH                Path to config file (suppressions are honored)
-  --strict-config              Treat config diagnostics (unknown rule id or key) as errors, not warnings
+  --strict-config              Treat config diagnostics (unknown rule id or key, inert reason) as errors, not warnings
 
 init options:
   -o, --output PATH            Where to write the config (default: .compose-lint.yml)
@@ -88,7 +88,10 @@ shipped inside the wheel, and it needs no network.
 threshold — that is the failure to act on. Exit 2 means compose-lint could not
 run, *or* could not see the whole stack: an unresolved `include:` or cross-file
 `extends:` means part of the stack was never graded, so the run cannot honestly
-report a verdict. Treating exit 2 as a findings failure invents remediation work
+report a verdict. An `include:` or cross-file `extends:` whose target resolves
+inside the project directory *is* followed and merged, so it is not a gap — the
+message on one that is says which residual it hit (outside the project, not
+found, interpolated, a cycle). Treating exit 2 as a findings failure invents remediation work
 that does not exist. Either resolve the coverage gap or downgrade it
 deliberately with `--allow-partial-coverage`, which demotes it to a stderr
 warning. `fix` reports gaps and never fails on them; it is not the gate.
@@ -108,8 +111,11 @@ Two consequences for an agent reporting on a `fix` run. An edit that alters
 runtime behavior carries a `⚠ behavior-changing` line naming what breaks —
 surface it, because the label *is* the mitigation; nothing else withholds the
 risky fix. And the diff goes to stdout while status goes to stderr, so
-`compose-lint fix file.yml > changes.diff` captures exactly the patch and
-nothing else.
+`compose-lint fix file.yml > changes.diff` captures the patch without the
+summary. The `⚠` lines lead that stdout block, above the diff, so the redirect
+captures them too: strip them before handing the file to `git apply`, and
+repeat them to the reader either way. Under `--apply` there is no diff, and
+those same lines go to stderr with the rest of the status.
 
 **Suppression has one shape.** Findings are suppressed in `.compose-lint.yml`
 with a `reason`, which flows through to `suppression_reason` in JSON,

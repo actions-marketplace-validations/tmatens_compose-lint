@@ -7,6 +7,348 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-12
+
+### Added
+
+- **`fix` now remediates CL-0022.** A tmpfs entry that re-enables `exec` or
+  `suid` loses just those tokens — `/run:exec,size=64m` becomes
+  `/run:size=64m`, `/tmp:exec` becomes `/tmp` — in either the list or the
+  scalar `tmpfs:` spelling, with quoting and comments left as written. The
+  rule's `noexec,nosuid` default is the same "revert a guardrail" shape as the
+  CL-0009 and CL-0014 fixers, and the edit is labelled behavior-changing in
+  the dry run: a workload that genuinely executes from the mount fails once
+  the default is back, and that case wants a suppression with a reason. The
+  fixer refuses anchored or merged services, flow-style lists, `${VAR}` in the
+  entry, and any line that does not show the whole value
+  ([ADR-014 amendment](docs/adr/014-fix-remediation.md)).
+
+### Changed
+
+- **The README is a fifth shorter, and what left it has a home.** It is the
+  landing page for someone deciding whether to run the tool, and it had grown
+  into a second copy of the docs: "What a run actually reads" was six
+  paragraphs and four ADR citations placed before the first example of output;
+  "Compose compatibility" answered "does this work on my file?" with a list of
+  exceptions; the GitHub Actions section carried a SHA-pinning essay and a
+  `permissions:` tutorial; `fix`, `init`, configuration and the agent section
+  each restated their guide. Now: a short *Grades what actually deploys*
+  section after Example Output with the one-line compatibility answer folded
+  in; the Python requirement under Installation; *How it compares* moved down
+  beside Versioning, table only; and every trimmed section keeps its link.
+  Two docs pages are new — [What a run reads](docs/what-a-run-reads.md) holds
+  the full account, ADR links and skipped-file shapes included, and
+  [GitHub Action](docs/github-action.md) is the first user-facing page for the
+  action: every input, the SHA-versus-`v1` reasoning, and the `permissions:`
+  rationale, none of which had lived anywhere but the README. Docs only;
+  nothing the tool does changed.
+
+### Fixed
+
+- **A per-rule `reason:` written without `enabled: false` now says so.** The
+  key is the justification that goes with a suppression, and on its own it
+  suppresses nothing — the rule stays on and keeps failing the build, which is
+  exactly the shape of a config that silently fails to take effect. The
+  unknown-per-rule-key check could not catch it, because `reason` is a
+  recognized key; it is a diagnostic of its own now, naming the rule id, and
+  `--strict-config` promotes it to a hard error like the others. On its own it
+  does not change the exit code
+  ([#723](https://github.com/tmatens/compose-lint/issues/723)).
+
+  Thanks [@Shaisolaris](https://github.com/Shaisolaris) ([#826](https://github.com/tmatens/compose-lint/pull/826)).
+
+- **`--explain` tells a malformed id, an unknown id, and a retired id apart.**
+  A well-formed id with no rule behind it, such as `CL-0012`, used to get the
+  format hint (`expected format: CL-XXXX`), which sent people hunting for a
+  typo that was not there. The hint is now reserved for ids that are not
+  `CL-XXXX` at all; an id retired under ADR-028 says it was retired and is
+  not reused; a well-formed id with no rule is reported as unknown. Exit code
+  2 is unchanged in every case
+  ([#725](https://github.com/tmatens/compose-lint/issues/725)).
+
+  Thanks [@Shaisolaris](https://github.com/Shaisolaris) ([#795](https://github.com/tmatens/compose-lint/pull/795)).
+- **CL-0011's tier table sent `PERFMON` and `SYS_TIME` to the wrong rule at
+  the wrong severity.** The table on that page is the one surface spanning
+  the whole `cap_add` family — it is where a reader lands to learn why their
+  entry was graded as it was — and it still said CL-0027 flags both at
+  MEDIUM, from before they moved to CL-0028 at HIGH, while describing the
+  family as three rules when there are six. The page now matches what the
+  linter reports, and a test holds every cap rule's capability table and the
+  tier table to the code, so the family cannot drift from its own docs again
+  ([#835](https://github.com/tmatens/compose-lint/pull/835)). Docs and tests
+  only; no finding changed.
+
+## [0.28.0] - 2026-09-08
+
+### Added
+
+- **CI now grades the lines a pull request changes, not just the repo
+  total.** The `coverage` job's repo-wide floor is what the OpenSSF Silver
+  `test_statement_coverage80` criterion measures, and it cannot see a change
+  that adds untested code: a few new uncovered lines do not move a whole-repo
+  percentage, so the gate was green either way and "does this change bring
+  tests?" rested on a self-ticked checkbox. `diff-cover` now reads the same
+  `coverage.xml` and requires 90% of the lines a PR adds or changes to be
+  covered, naming the uncovered ones in the job summary. The floor is
+  unchanged — this is an extra condition, not a replacement — and a genuinely
+  untestable line still has `# pragma: no cover`. A docs- or tests-only PR has
+  nothing to measure and passes — and because a gate that has silently stopped
+  measuring reports exactly the same thing, a companion check requires every
+  file the coverage report names to exist in the repository, and fails the
+  build rather than passing on a report that could never have matched
+  ([#802](https://github.com/tmatens/compose-lint/issues/802)).
+
+### Fixed
+
+- **`fix` no longer refuses a whole file because one key was deleted with
+  `!reset`.** A `!reset` removes the key from the configuration Compose runs,
+  so an absence rule fires on it and its fixer wrote the key straight back into
+  a document where the reset deletes it again. Two ways that showed, both
+  fail-closed and both discarding every other fix in the file: the document did
+  not hold the key, so the patch did not converge; or it still held it, so the
+  insertion duplicated a mapping key and Compose rejected the result. Neither
+  message named the `!reset` that caused it, so both read as an internal fixer
+  bug. That finding is now deferred on its own, with a note naming the key and
+  the file the `!reset` is written in, and every other fix in the file applies.
+  A rule declares which service-level keys its fixer writes, so a report-only
+  rule is unaffected and a new fixer cannot opt out silently. No second
+  document is needed for any of this — a `!reset` in the only file there is
+  behaves the same way
+  ([#811](https://github.com/tmatens/compose-lint/issues/811)).
+
+- **`fix` no longer refuses a whole file because another document's findings
+  cannot be fixed in it.** The convergence check filters out findings belonging
+  to another document, but the filter was gated on an overlay being merged.
+  Since ADR-036 a document merges others through `include:` and a cross-file
+  `extends:` with no overlay at all, and in those projects the filter was off:
+  the convergence pass asked for the edits of findings written in another file,
+  against this file's text, and reported a second pass that is never attempted.
+  Every fix in the file was discarded with the refusal. The edit pass already
+  decided this from the finding's own source file; the convergence pass now
+  asks the same question
+  ([#814](https://github.com/tmatens/compose-lint/issues/814)).
+
+- **A finding written in an included file is no longer reported against the
+  file that includes it.** Once `include:` or a cross-file `extends:` had
+  folded another document in, merging an overlay beside it credited every
+  folded line to the primary document: `file` and `line` are part of the JSON
+  and SARIF contract, so a code-scanning annotation landed on the wrong file at
+  a line that usually belongs to a different service. Two `Document`
+  constructors — the one every `load_merged` document goes through, and the
+  candidate `fix` re-parses to verify a patch — did not seed the per-path
+  provenance the merge carries. `fix` read the same provenance to decide what
+  it may edit here, so it also treated a foreign finding as local and used that
+  file's line numbers as insertion points in this one; ADR-014's nets refused
+  the result and wrote nothing, but the whole file's fixes were discarded with
+  it. Reachable only with an overlay merged, which is why the `include:` and
+  `extends:` suites never saw it
+  ([#813](https://github.com/tmatens/compose-lint/issues/813)).
+
+- **An object-form `include:` entry is now treated as one sub-project.** When
+  an entry's `path:` is a list, the files in it are one project assembled from
+  several documents, and every relative path written anywhere inside it
+  resolves against that project's directory — the first path's directory, or
+  `project_directory:` where the entry names one. Each file was resolving
+  against its own directory instead, which moved bind sources, nested
+  `include:` targets, `env_file:` targets and the sub-project's own `.env` to
+  the wrong place: a host path the deployed container never mounts (graded by
+  CL-0013, CL-0017 and CL-0025), and a nested reference reading a different
+  document as if it were the right one. The list form is unaffected — two bare
+  entries are two sub-projects, each rooted at its own file — and the
+  containment boundary is unchanged, so a sub-project still cannot reach
+  outside the including project
+  ([#807](https://github.com/tmatens/compose-lint/issues/807)).
+
+- **`!override` and `!reset` no longer coerce a quoted scalar to its plain
+  type.** The tag's scalar was re-resolved through its quoting, so
+  `user: !override "0"` became the int `0` — a value Compose refuses outright
+  (`services.app.user must be a string`) — and `privileged: !override "yes"`
+  became the boolean the quotes were written to prevent. Quoting decides the
+  type; the tag decides the merge. Plain values are unchanged, so
+  `!override 8080` is still an int and `!reset null` still deletes the key, and
+  untagged values were never affected. No finding changes today: CL-0018
+  already reads the int `0` as root and CL-0002 already accepts the YAML 1.1
+  boolean spellings — the defect was in the type of the merged value
+  ([#805](https://github.com/tmatens/compose-lint/issues/805)).
+
+- **`extends:` now resolves after `include:` folds in, which is the order
+  Compose uses.** A service extending one that an included file contributes to
+  was inheriting the *unincluded* version of its base, so the configuration
+  being graded was not the one Compose runs. The order is not symmetric —
+  `include:` merges before `extends:` resolves, and a `-f` or
+  `compose.override` document merges after it — and only the first half was
+  wrong. It was silent in both directions: an absence rule (CL-0003, CL-0006,
+  CL-0007, CL-0026) reported missing hardening the deployed container has,
+  and a presence rule (CL-0002, CL-0009, CL-0010, CL-0018, CL-0020, CL-0027)
+  missed configuration it has — `user: root` inherited through an included
+  file went ungraded by CL-0018. Cross-file `extends:` inverted the same way,
+  reporting the base's `user` where Compose ships the included file's
+  ([#800](https://github.com/tmatens/compose-lint/issues/800)).
+
+- **An empty-but-present config section is no longer a fatal error.** In YAML a
+  key with no value is `null`, so `rules:` and `rules: {}` express the same
+  intent — no rule overrides — but the first aborted the run at exit 2 while
+  the second worked. The same split applied to a blank per-rule block and a
+  blank `exclude_services:`. All three now read as the empty mapping, matching
+  their `{}` form exactly, including under `--strict-config`. Every other wrong
+  type is still a hard error: `rules: hello` and `exclude_services: 5` continue
+  to exit 2 with their existing messages
+  ([#724](https://github.com/tmatens/compose-lint/issues/724)).
+
+  Thanks [@VedantMadane](https://github.com/VedantMadane) ([#726](https://github.com/tmatens/compose-lint/pull/726)).
+
+- **Mixing the list and mapping spellings of a key/value field across two
+  documents now merges the way Compose merges it.** `environment:`, `labels:`,
+  `sysctls:` and `depends_on:` each accept a list of `K=V` strings or a
+  mapping, and a base file may use one spelling while its overlay uses the
+  other. The merge used to flatten the mapping side back into strings with
+  Python's `str()`, which is not a spelling Compose has: a `depends_on: [db]`
+  base under a `depends_on: {db: {condition: service_healthy}}` overlay
+  produced the list entry `db={'condition': 'service_healthy'}`, and a typed
+  value such as `environment: {DEBUG: true}` arrived as `DEBUG=True` rather
+  than Compose's `DEBUG: "true"`. Both sides are now expanded to the mapping
+  Compose resolves them to and merged by name, including `depends_on`'s short
+  form standing for the whole long-form entry. Same-spelling documents are
+  untouched, and no finding changes — the rules that read `environment:`
+  already accept either form
+  ([#797](https://github.com/tmatens/compose-lint/issues/797)).
+
+## [0.27.0] - 2026-09-07
+
+### Added
+
+- **`py.typed` marker.** The package has been type-checked in strict mode
+  since early on, but without the marker any downstream `import compose_lint`
+  saw every symbol as `Any`. mypy and pyright now pick up the real
+  signatures. CI also type-checks `tests/` now (relaxed, not strict); the
+  handful of real errors it surfaced are fixed. Prompted by #775.
+
+### Changed
+
+- **Docs describing what a run reads are brought in line with what it does.**
+  `docs/severity.md` and [ADR-020](docs/adr/020-severity-scoping-and-overrides.md)
+  §3 said analysis reads "the compose file(s) named on the command line plus
+  `.compose-lint.yml`", which had been incomplete since the sibling `.env`
+  (ADR-026) and `env_file:` targets (ADR-027) and is more so now. Both state
+  the boundary that actually holds instead: the documents the named file
+  *routes to*, all of which must resolve inside its own directory — and still
+  no registry, no daemon, no image contents. README's "What a run actually
+  reads" and `docs/compatibility.md`'s coverage-gap section say the same.
+
+- **`include:` is now followed when its targets stay inside the project, and an
+  include-only file is lintable**
+  ([ADR-036](docs/adr/036-resolve-references-that-stay-inside-the-project.md)).
+  The same two-gate containment rule the previous entry applies to `extends:`,
+  and the same residual gaps. A file whose only services come from `include:`
+  was refused at parse time under every command, flag included; it is now
+  linted when its references resolve. That is where the construct lives: nine
+  include-only monorepo roots carry 245 of the 273 `include:` references in an
+  11,111-file corpus. #516's rule is intact — a root whose references *all*
+  fail still refuses, as a parse error rather than a downgradable gap, because
+  nothing at all was read.
+
+  **Three merge orderings, all measured against Compose 5.5.0, and they differ
+  from each other.** The including document overrides everything it includes;
+  an *earlier* `include:` entry overrides a later one, which is the reverse of
+  `-f a -f b`; and within one object-form `path:` list *later* wins again,
+  because that list is one project assembled from several files. The same two
+  files under one entry and under two entries produce opposite answers. An
+  included file's top-level `networks:` and `volumes:` reach the project too —
+  it is a whole-document merge.
+
+  **An included file's own `.env` is read, under the project's.** The project
+  wins every name they both define; a name only the included file's supplies is
+  still supplied. This corrects the design note that said an included file
+  interpolates from its own directory, and it is *not* what `extends:` does — a
+  base ignores a `.env` beside itself entirely. `--no-env` covers both.
+  `env_file:` and `project_directory:` in the object form are read but not
+  acted on, because neither redirected interpolation on the fixture that
+  measured it.
+
+  `coverage_gaps()` is gone from the parser's surface: with both constructs
+  resolved per reference, nothing about a gap can be derived from the document
+  alone any more. Corpus comparator over all 11,111 files: **zero of 158,076
+  finding rows changed**, and the same 94 files report a coverage gap — the
+  corpus has no sibling files, so nothing in it resolves either way. Refs #780.
+
+- **A cross-file `extends: {file: ...}` that stays inside the project is now
+  resolved and merged, instead of being refused as a coverage gap**
+  ([ADR-036](docs/adr/036-resolve-references-that-stay-inside-the-project.md)).
+  The base is graded by *where its path resolves*, under the same two-gate
+  containment rule `env_file:` already uses: a lexical test that reads the same
+  on every platform (ADR-023 §1), then a filesystem test at read time that
+  refuses a symlink pointing out of the project, then a bounded read. 98.3% of
+  the `extends:` references in an 11,111-file corpus resolve inside.
+
+  Two directories, verified against Compose 5.5.0 on a fixture before being
+  implemented: the base's own relative paths resolve against **the base file's
+  directory** (`./cfg` in `shared/base.yml` mounts `shared/cfg`), while its
+  `${VAR}` values come from **the project's `.env`** and never from one sitting
+  beside the base. An inherited `env_file:` is re-spelled against the project
+  root so it is read from where Compose reads it. Chains are followed as
+  Compose follows them, bounded at 8 deep and 64 files, and a cycle ends as a
+  gap rather than a hang.
+
+  **Exit codes move only for references that now resolve**, identically under
+  every command: `check` on a present, inside base goes from 2 to the ordinary
+  0/1 findings verdict, and its JSON `errors[]` entry and SARIF
+  `toolExecutionNotifications` record go away with `executionSuccessful: true`.
+  A resolved base can surface a finding that was invisible before, so a file
+  can go 0 to 1 — that is the new-findings class, and it is why this is the
+  "retire a coverage-gap condition" row rather than a PATCH. A finding whose
+  evidence is written in the base names that file, and `fix` still rewrites
+  only the file it was pointed at, deferring the rest by name.
+
+  Everything else stays a gap at today's exit code, and the message now says
+  *which*: outside the project directory, not found, interpolated, unreadable,
+  a cycle, a cap, or a base that declares no such service.
+
+  Verified with a corpus comparator over all 11,111 files (in-process
+  `load_compose` + `run_rules` on a worktree of `main` against this branch;
+  control path `/etc` present in 1,845 of them): **zero of 158,076 finding rows
+  changed**, and the same 94 files report a coverage gap before and after. That
+  bounds the regression risk; it does not exercise the resolution path, because
+  the corpus stores files individually with no sibling context, so every
+  reference in it is a missing target either way. The resolution semantics are
+  pinned by fixture tests measured against Compose 5.5.0 instead. Refs #780.
+
+- **The bump policy now prices coverage-gap conditions**
+  ([ADR-036](docs/adr/036-resolve-references-that-stay-inside-the-project.md)).
+  A coverage gap is not a finding, so `--fail-on` cannot gate it — an
+  unresolved `include:` or cross-file `extends:` exits 2 at every threshold —
+  yet `docs/compatibility.md` offered only pinning and `--fail-on` as escape
+  hatches. Post-1.0, *adding* an exit-2 coverage-gap condition is a MINOR with
+  ADR-031's one-release runway (announce as a warning, enforce the next
+  release) and *retiring* one is a plain MINOR; neither is a change to the
+  exit-code contract. `--allow-partial-coverage` is now named in the
+  compatibility promise as the third hatch. The same ADR decides that an
+  `include:` or `extends:` reference resolving inside the project directory
+  should be read rather than refused, using the containment rule already
+  shipped for `env_file:`, and amends ADR-023's precedent list accordingly.
+  Implementation follows; this release is policy only. Refs #780.
+
+- **No agent skill ships as a distribution channel**
+  ([ADR-035](docs/adr/035-defer-the-agent-skill-channel.md)). The agent-facing
+  surface stays the [Automation and agent
+  use](https://tmatens.github.io/compose-lint/cli/#automation-and-agent-use)
+  section, the README pointer at it, and the pre-commit hook and Action that
+  grade agent-authored Compose without needing the agent's cooperation. A
+  published skill would reach only the human who could wire those gates
+  instead, has no demand signal, and has no staging or signing analog for the
+  channel contract. The ADR records what would reopen it. Closes #763.
+
+### Fixed
+
+- **`fix` no longer tells you to pass `--allow-partial-coverage`**, a flag
+  only `check` accepts. The coverage-gap warning for an unresolved
+  `include:` or cross-file `extends:` was one sentence shared by both
+  commands, so `fix` named a remedy its own parser rejects. The flag is not
+  added to `fix` — it never fails on a gap, so there is nothing to accept.
+  Instead the remedy is scoped to the caller: `check` still names the flag
+  and the merged-output route on every channel; `fix` says that what was
+  not seen was not fixed, and names only the merged-output route. Closes
+  #779.
+
 ## [0.26.0] - 2026-08-27
 
 ### Added
@@ -3079,7 +3421,10 @@ First public release.
   inputs through `env:` rather than direct `${{ }}` interpolation to prevent
   shell injection.
 
-[Unreleased]: https://github.com/tmatens/compose-lint/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/tmatens/compose-lint/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/tmatens/compose-lint/compare/v0.28.0...v0.29.0
+[0.28.0]: https://github.com/tmatens/compose-lint/compare/v0.27.0...v0.28.0
+[0.27.0]: https://github.com/tmatens/compose-lint/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/tmatens/compose-lint/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/tmatens/compose-lint/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/tmatens/compose-lint/compare/v0.23.0...v0.24.0

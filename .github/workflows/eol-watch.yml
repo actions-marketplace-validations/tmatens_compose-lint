@@ -37,6 +37,8 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # No setup-python: the script is stdlib-only (tomllib needs >=3.11)
       # and the runner's own interpreter satisfies that. Nothing to install
@@ -83,20 +85,6 @@ jobs:
 
       - name: Report scheduled failure as issue
         if: failure() && github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          WORKFLOW: ${{ github.workflow }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          title="Scheduled run failed: ${WORKFLOW}"
-          body=$(printf -- '- Workflow: **%s**\n- Run: %s\n- Commit: %s\n\nThe EOL radar did not complete, so the calendar is unwatched until this is fixed.' \
-            "${WORKFLOW}" "${RUN_URL}" "${GITHUB_SHA}")
-          existing=$(gh issue list --state open --search "\"${title}\" in:title" \
-            --json number --jq '.[0].number // empty')
-          if [ -n "${existing}" ]; then
-            gh issue comment "${existing}" --body "${body}"
-          else
-            gh issue create --title "${title}" --body "${body}"
-          fi
+        uses: $/.github/actions/report-scheduled-failure
+        with:
+          note: The EOL radar did not complete, so the calendar is unwatched until this is fixed.

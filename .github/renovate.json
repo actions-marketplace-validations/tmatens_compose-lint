@@ -31,6 +31,27 @@
     "enabled": false,
     "description": "pyproject.toml is already covered by pep621 + pip-compile. The poetry manager detects the same [project] deps but is not in the python group rule, so it spawned duplicate ungrouped PRs that bumped pyproject without regenerating the lockfiles (e.g. renovate/ruff-0.x, #329)."
   },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The Docker Compose plugin the differential suites are graded against. The runner image pins its own — images/ubuntu/toolsets/toolset-2404.json in actions/runner-images holds it at 2.38.2 while docker/compose is on 5.x — and that version is not a choice this project made: CI was grading ADR-036's include: orderings, every one measured on Compose 5.5.0, against a binary that refuses the documents describing them ('services.web conflicts with imported resource'). .github/scripts/install-compose-plugin.sh installs the pin ahead of the image's copy; this manager moves it. Deliberately outside the automerge packageRule below, which matches only pep621/pip_requirements/pip-compile/github-actions: a Compose bump is precisely the PR that has to be triaged into 'Compose changed', 'we were wrong', or 'a new deliberate divergence', so it opens for review rather than merging itself. ci.yml is in the `code` change filter so this PR actually runs the suites it exists to re-prove.",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>.+?)\\s+COMPOSE_VERSION: (?<currentValue>v\\S+)"
+      ],
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Release binaries that ci.yml jobs download from a GitHub Release and verify against the release's checksums file (actionlint, hadolint). The version is a bare X.Y.Z literal beside a `# renovate:` annotation; the tag carries a v prefix, so extractVersion strips it. Not in the automerge rule (that matches managers, and this is neither pep621 nor github-actions), so a bump opens for review with the tool's release notes as the review.",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>.+?)\\s+[A-Z_]+_VERSION: \"(?<currentValue>[0-9][^\"]*)\""
+      ],
+      "extractVersionTemplate": "^v(?<version>.+)$",
+      "versioningTemplate": "semver"
+    }
+  ],
   "packageRules": [
     {
       "description": "GitHub Actions: SHA-pin every uses: with version comment (CLAUDE.md).",
@@ -63,18 +84,19 @@
       "enabled": false
     },
     {
-      "description": "Forgejo smoke harness: Codeberg deletes a superseded Forgejo patch tag — pinned digest included — within days of the next patch shipping, so waiting for the weekly Monday window leaves the pin 404ing and the weekly smoke run red (#746, #748). Open the bump PR same-day instead. Merge stays manual (no automerge rule matches docker-compose): the forgejo-smoke workflow re-proving the compose+docs/forgejo.md pair on the merge push is the guardrail.",
+      "description": "Forgejo smoke harness: NOT Renovate's. The hosted runner cannot look up codeberg.org/forgejo/forgejo or data.forgejo.org/forgejo/runner (Dependency Dashboard: 'no-result' + 'Error obtaining docker token', while a local `renovate --platform=local --dry-run=lookup` resolves both — the hosted runner's egress, not the registries), so the same-day bump rule that replaced #748's tests/ move never produced a PR, and a Renovate PR could not pass anyway: forgejo-smoke asserts docs/forgejo.md's 'Verified on Forgejo X, runner Y' line against the live stack, and Renovate cannot move that line. forgejo-smoke-bump.yml owns both files instead (daily; scripts/forgejo_smoke_bump.py). Disabled here so two writers never race on the same pin; the file stays listed on the dashboard for visibility.",
       "matchManagers": ["docker-compose"],
       "matchFileNames": ["scripts/forgejo_smoke/compose-forgejo-smoke.yml"],
-      "schedule": ["at any time"]
+      "enabled": false
     },
     {
-      "description": "Automerge low-risk routine updates once CI is green. Patch-level Python dep bumps, pinned-digest refreshes for GitHub Actions, and lockFileMaintenance go in without human review. Docker base images stay manual because the OCI manifest-list vs per-arch digest check (see MEMORY.md) is not mechanically verified in CI.",
+      "description": "Automerge low-risk routine updates once CI is green. Patch-level Python dep bumps, pinned-digest refreshes for GitHub Actions, and lockFileMaintenance go in without human review. Docker base images stay manual because the OCI manifest-list vs per-arch digest check (see MEMORY.md) is not mechanically verified in CI. minimumReleaseAge is the one human-shaped gate on that path: a release merges itself only after it has been public for three days, which is the window in which a compromised or broken upstream release is usually pulled or yanked. Hash-locked installs do not help here — they pin whatever release was current. The PR still opens at once; Renovate holds a renovate/stability-days check pending until the age passes, then automerge proceeds. platformAutomerge is deliberately FALSE so that gate cannot be routed around: GitHub's native auto-merge lands a PR as soon as its REQUIRED checks pass, and the only required check here is ci-ok — renovate/stability-days is not one, so a platform-armed PR could merge inside the three days the option exists to enforce. Renovate merging on its own, after its own checks, is the behaviour this repo has always had (platform auto-merge was unavailable at repo level until the marketplace-pin job needed it), so this pins it rather than changes it. Security PRs are unaffected: vulnerabilityAlerts defaults minimumReleaseAge to null, so an OSV fix still lands immediately.",
       "matchManagers": ["pep621", "pip_requirements", "pip-compile", "github-actions"],
       "matchUpdateTypes": ["patch", "pin", "digest", "lockFileMaintenance"],
+      "minimumReleaseAge": "3 days",
       "automerge": true,
       "automergeType": "pr",
-      "platformAutomerge": true
+      "platformAutomerge": false
     }
   ]
 }

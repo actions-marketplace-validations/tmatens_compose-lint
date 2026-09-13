@@ -157,6 +157,28 @@ class TestOverrideTags:
         )
         assert data["services"]["app"]["shm_size"] == 8080
 
+    def test_override_scalar_keeps_a_quoted_value_a_string(self) -> None:
+        """Quoting decides the type; the tag decides the merge. Not the reverse.
+
+        Re-resolving through the quotes coerced every quoted override value:
+        `user: "0"` became the int 0 — which Compose refuses outright,
+        `services.app.user must be a string` — and `privileged: "yes"` became
+        the boolean the quotes were written to prevent. Untagged values were
+        never affected, so the tag was the only route that discarded the style.
+        """
+        data, _lines = loads(
+            "services:\n"
+            "  app:\n"
+            "    image: nginx\n"
+            '    user: !override "0"\n'
+            '    privileged: !override "yes"\n'
+            '    mem_limit: !override "512"\n'
+        )
+        app = data["services"]["app"]
+        assert app["user"] == "0"
+        assert app["privileged"] == "yes"
+        assert app["mem_limit"] == "512"
+
     def test_override_mapping_keeps_line_tracking(self) -> None:
         data, lines = loads(
             "services:\n"
@@ -665,17 +687,20 @@ class TestFragmentOverlayMerging:
         self, tmp_path: Path
     ) -> None:
         # #516 established that an include-only file is not a harmless
-        # fragment: compose-lint does not resolve include, so folding one into
-        # the merge would grade a stack whose services it never saw. This pins
-        # the boundary the fragment admission must respect — "services-less"
-        # is not wide enough to admit it, or a later widening of the bucket
-        # would silently undo #516.
+        # fragment: folding one into the merge would grade a stack whose
+        # services it never saw. ADR-036 resolves `include:` now, but this
+        # target is absent, so nothing was read and the refusal stands. This
+        # pins the boundary the fragment admission must respect —
+        # "services-less" is not wide enough to admit it, or a later widening
+        # of the bucket would silently undo #516.
         base = tmp_path / "compose.yml"
         over = tmp_path / "compose.override.yml"
         base.write_text("services:\n  web:\n    image: nginx\n")
         over.write_text("include:\n  - other.yml\n")
 
-        with pytest.raises(ComposeError, match="uses 'include:'") as excinfo:
+        with pytest.raises(
+            ComposeError, match="services all come from 'include:'"
+        ) as excinfo:
             load_merged([base, over])
         assert not isinstance(excinfo.value, ComposeNotApplicableError)
 

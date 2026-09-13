@@ -51,7 +51,7 @@ jobs:
     # 'contents: none'" — before any job exists to report it.
     permissions:
       contents: read
-    uses: ./.github/workflows/verify-tag.yml
+    uses: $/.github/workflows/verify-tag.yml
     with:
       tag: ${{ github.ref_name }}
 
@@ -67,14 +67,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # No pip cache on any job in this workflow: it runs on a tag and
+      # publishes what it builds, and the Actions cache is writable from any
+      # branch that shares the key. A poisoned entry would reach the
+      # artifacts (zizmor: cache-poisoning). Every install here is
+      # hash-verified from a lockfile, so a cold cache costs seconds.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-          cache: pip
-          cache-dependency-path: |
-            requirements.lock
-            requirements-dev.lock
-            requirements-build.lock
       - name: Install pinned build env
         run: |
           pip install --require-hashes -r requirements-dev.lock
@@ -171,7 +171,7 @@ jobs:
       # the PyPI gap so every shipped channel has a machine-readable bill
       # of materials. Attached as a Release asset by create-release.
       - name: Generate SPDX SBOM for dists
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: dist/
           format: spdx-json
@@ -194,12 +194,14 @@ jobs:
         # subjects. Alias it per-artifact so the filename convention
         # (<artifact>.intoto.jsonl) matches Scorecard's pattern scan of
         # Release assets.
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
         run: |
           mkdir -p provenance
           shopt -s nullglob
           for d in dist/*.whl dist/*.tar.gz; do
             base="$(basename "$d")"
-            cp "${{ steps.provenance.outputs.bundle-path }}" "provenance/${base}.intoto.jsonl"
+            cp "${BUNDLE_PATH}" "provenance/${base}.intoto.jsonl"
           done
           ls provenance/
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -242,7 +244,9 @@ jobs:
   testpypi-smoke:
     needs: testpypi
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Raised from 10: the index wait below can spend ~5 min before the install
+    # starts, which the old fixed-sleep retry never did.
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -252,11 +256,6 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-          cache: pip
-          cache-dependency-path: |
-            requirements.lock
-            requirements-dev.lock
-            requirements-build.lock
       - name: Install the dependency closure from the hash-pinned lock
         # The dependencies must not come from TestPyPI. `-i` makes an index
         # *primary*, and pip then prefers the highest version across every
@@ -269,31 +268,97 @@ jobs:
         # nothing left to resolve.
         run: pip install --require-hashes -r requirements.lock
 
+      - name: Wait for TestPyPI to list the version
+        # The install below fails until the /simple/ index lists a file for
+        # this version, and that is a propagation delay, not a fault: TestPyPI's
+        # JSON API sees a release within seconds while /simple/ can lag by
+        # minutes. Probing that with `pip install` and reading the exit code
+        # cannot tell "not propagated yet" from "genuinely broken", so it used
+        # to fail the release on a transient — 6 fixed 20s sleeps (~100s of
+        # waiting) against a lag measured in minutes, which flaked 0.3.6 and
+        # again 0.28.0. Both times re-running the job alone passed unchanged.
+        #
+        # Wait on the actual precondition instead, with backoff, and report
+        # which surface is behind so a real failure is distinguishable.
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json, os, sys, time, urllib.error, urllib.request
+
+          version = os.environ["VERSION"].lstrip("v")
+          SIMPLE = "https://test.pypi.org/simple/compose-lint/"
+          JSON_API = "https://test.pypi.org/pypi/compose-lint/json"
+
+          def fetch(url, simple=False):
+              headers = {"Accept": "application/vnd.pypi.simple.v1+json"} if simple else {}
+              try:
+                  with urllib.request.urlopen(
+                      urllib.request.Request(url, headers=headers), timeout=30
+                  ) as r:
+                      return json.loads(r.read())
+              except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+                  return None
+
+          def visible():
+              """(in_json, files_in_simple) for this version."""
+              meta, simple = fetch(JSON_API), fetch(SIMPLE, simple=True)
+              in_json = bool(meta) and version in meta.get("releases", {})
+              files = [
+                  f["filename"]
+                  for f in (simple or {}).get("files", [])
+                  if f["filename"].startswith(f"compose_lint-{version}")
+              ]
+              return in_json, files
+
+          # ~4.75 min of waiting, front-loaded, which leaves headroom inside
+          # the job's timeout for the install and smoke steps below. The common
+          # case is that the first probe succeeds and none of this costs
+          # anything.
+          delays = [0, 10, 20, 30, 45, 60, 60, 60]
+          for attempt, delay in enumerate(delays, start=1):
+              if delay:
+                  time.sleep(delay)
+              in_json, files = visible()
+              if files:
+                  print(f"/simple/ lists {version} after {attempt} probe(s): {files}")
+                  break
+              print(
+                  f"probe {attempt}: json={'yes' if in_json else 'no'} "
+                  f"simple=no — waiting for the index"
+              )
+          else:
+              in_json, files = visible()
+              print(f"::error::TestPyPI never listed {version} in /simple/. "
+                    f"JSON API: {'has it' if in_json else 'does NOT have it'}; "
+                    f"/simple/: {files or 'no files'}. "
+                    f"JSON yes + /simple/ no means propagation is still catching up "
+                    f"(re-run this job); both no means the upload did not land.")
+              sys.exit(1)
+          PY
+
       - name: Install from TestPyPI and verify version
-        # TestPyPI's JSON API sees a new release within seconds of the
-        # publish step, but the /simple/ index pip uses can lag by
-        # minutes. A fixed sleep has flaked mid-release before (0.3.6),
-        # so retry the install with backoff until the index catches up
-        # or we hit ~2 minutes of attempts.
+        # The index now lists the version; a couple of retries still cover the
+        # short window where /simple/ is updated but a file is not yet served.
         #
         # `--no-deps` is what keeps TestPyPI scoped to the one artifact under
         # test: it is the only thing that legitimately lives there, and its
         # dependencies are already installed above.
         run: |
           version="${GITHUB_REF_NAME#v}"
-          for attempt in 1 2 3 4 5 6; do
+          for attempt in 1 2 3; do
             if pip install \
                 --no-deps \
                 -i https://test.pypi.org/simple/ \
                 "compose-lint==${version}"; then
               break
             fi
-            if [ "${attempt}" = 6 ]; then
-              echo "::error::TestPyPI install failed after 6 attempts; index may still be propagating"
+            if [ "${attempt}" = 3 ]; then
+              echo "::error::TestPyPI install failed after 3 attempts even though /simple/ lists ${version}"
               exit 1
             fi
-            echo "Attempt ${attempt} failed; sleeping 20s for /simple/ index propagation..."
-            sleep 20
+            echo "Attempt ${attempt} failed; retrying in 15s..."
+            sleep 15
           done
           expected="compose-lint ${version}"
           actual="$(compose-lint --version)"
@@ -344,7 +409,7 @@ jobs:
     needs: build
     permissions:
       contents: read
-    uses: ./.github/workflows/release-docker-smoke.yml
+    uses: $/.github/workflows/release-docker-smoke.yml
     with:
       tag: ${{ github.ref_name }}
       matrix: >-
@@ -380,10 +445,12 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: composelint/compose-lint:scout
+      # Read-only PAT: this job pulls and scans, never pushes. The write
+      # token is referenced only by the jobs that push or sync.
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
       - name: Scan for vulnerabilities (Docker Scout)
         uses: docker/scout-action@7c6b6c3f7844478ace1ffd4e7aef649053d1f87d # v1.24.0
         with:
@@ -415,7 +482,7 @@ jobs:
       # should fail closed for a human to re-run.
       - name: Upload Scout results to GitHub Security
         if: always() && hashFiles('scout-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: scout-results.sarif
           category: docker-scout
@@ -597,7 +664,7 @@ jobs:
             exit 1
           fi
       - name: Generate SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: composelint/compose-lint@${{ steps.inspect.outputs.digest }}
           format: spdx-json
@@ -643,7 +710,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/update-dockerhub-description
+      - uses: $/.github/actions/update-dockerhub-description
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -742,11 +809,6 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-          cache: pip
-          cache-dependency-path: |
-            requirements.lock
-            requirements-dev.lock
-            requirements-build.lock
       - name: Install sigstore verifier (hash-pinned)
         run: pip install --require-hashes -r requirements-dev.lock
       - name: Download release assets
@@ -810,8 +872,9 @@ jobs:
   #     version and the GitHub Release page is live.
   # Only in that state does updating the Marketplace smoke test pin make
   # sense: the pinned SHA must point at an artifact that actually shipped.
-  # This job opens a PR; a human still reviews and merges it, and then
-  # triggers the Marketplace smoke workflow to verify end-to-end.
+  # This job opens a PR; a human still reviews and merges it. The merge is
+  # what runs the Marketplace smoke workflow end-to-end: it triggers on a push
+  # to main that touches its own file, so no manual dispatch follows.
   bump-marketplace-smoke-pin:
     name: Bump marketplace-smoke pin (post-tag, post-publish)
     needs: create-release
@@ -926,7 +989,9 @@ jobs:
 
           Bumps the pin in \`.github/workflows/marketplace-smoke.yml\` **and** the copy-paste GitHub Action snippet in \`README.md\` — both use the \`@<sha> # vX.Y.Z\` form that CI cannot check pre-tag.
 
-          **After merging this PR**, trigger **Actions → Marketplace smoke test → Run workflow** to verify the published Action end-to-end against the new tag.
+          **Merging this PR runs the Marketplace smoke test**: the workflow triggers on a push to \`main\` that touches its own file, so no manual dispatch is needed. Check that run's result against the new tag.
+
+          Auto-merge is armed, so this lands on its own once \`ci-ok\` is green -- no click needed. If that smoke then fails it opens an issue titled \`Post-release run failed: Marketplace smoke test\`; a green run is silent.
           EOF
           # Strip the 10-space indentation that the YAML block scalar requires.
           sed -i -E 's/^          //' /tmp/pr-body.md
@@ -935,6 +1000,39 @@ jobs:
             --head "${branch}" \
             --title "Bump marketplace-smoke pin to ${TAG}" \
             --body-file /tmp/pr-body.md
+
+          # Arm auto-merge: GitHub merges once `ci-ok` goes green, which is
+          # what a human was waiting for anyway. This PR opens strictly AFTER
+          # publish, docker-publish and create-release succeeded, so the
+          # merge gates nothing irreversible -- the release-gate environment
+          # approval upstream is the control, and it has already happened.
+          # The pinned SHA is `git rev-parse "${TAG}^{commit}"` from the step
+          # above, so "is this the right SHA" is true by construction rather
+          # than by inspection.
+          #
+          # Not failing the job when this does not take. The release has
+          # shipped by now; a red X here would say something is wrong with
+          # the release when the only thing wrong is that a follow-up PR
+          # needs a manual click. The warning and the step summary say which.
+          #
+          # Requires "Allow auto-merge" on the repository (Settings ->
+          # General). Without it `gh pr merge --auto` exits non-zero and this
+          # falls through to the warning.
+          if gh pr merge "${branch}" --auto --squash --delete-branch; then
+            echo "Auto-merge armed; GitHub will squash-merge once ci-ok is green."
+            {
+              echo ""
+              echo "Auto-merge is armed on the pin PR -- it lands on its own once \`ci-ok\` passes,"
+              echo "and that merge triggers the post-release marketplace smoke."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Could not arm auto-merge on the pin PR -- merge it by hand to trigger the post-release smoke. Check that 'Allow auto-merge' is enabled in Settings > General."
+            {
+              echo ""
+              echo "**Auto-merge could not be armed.** Merge the pin PR by hand; that merge is"
+              echo "what triggers the post-release marketplace smoke."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # Move the floating Action major tag (uses: tmatens/compose-lint@v1) to
   # this release once everything above has published and verified. Only for

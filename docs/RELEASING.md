@@ -137,7 +137,9 @@ Once `1.0.0` ships, the contract tightens:
     (an evidence-refuted retirement through the lifecycle is MINOR; rule
     IDs are never reused either way — see `AGENTS.md`).
   - Changing the exit-code contract (e.g., adding a new non-zero
-    exit code, changing the default `--fail-on` threshold).
+    exit code, changing the default `--fail-on` threshold). Adding or
+    retiring a *condition* under the existing exit 2 is not that — see
+    the coverage-gap rows in the cheat sheet.
   - Restructuring JSON/SARIF output in a way that removes or renames
     existing fields.
   - Dropping support for a Python version *off-schedule* — before its
@@ -161,6 +163,8 @@ Once `1.0.0` ships, the contract tightens:
 | Retire a rule admitted on *judgment* (ADR-028 records it as such), via lifecycle | MINOR | MINOR (ADR-032 cond. 1) |
 | Retire a rule ID off-lifecycle               | MINOR   | MAJOR    |
 | Change the default `--fail-on` threshold     | MINOR   | MAJOR    |
+| Add an exit-2 coverage-gap condition         | MINOR   | MINOR, announced one release ahead (ADR-036) |
+| Retire an exit-2 coverage-gap condition      | MINOR   | MINOR (ADR-036) |
 | Drop a Python version on schedule (ADR-029)  | MINOR   | MINOR    |
 | Drop a Python version off-schedule           | MINOR   | MAJOR    |
 | Add a field to JSON/SARIF output             | MINOR   | MINOR    |
@@ -176,7 +180,7 @@ When in doubt pre-1.0, pick MINOR. When in doubt post-1.0, pick the
 higher bump — MAJOR costs the maintainer some release ceremony, but a
 too-low bump breaks users who trusted the version contract.
 
-Three rows need a word of explanation, because each was a real gap rather
+Four rows need a word of explanation, because each was a real gap rather
 than an omission for brevity.
 
 **Evidence.** A rule's `evidence` never appears in text output, so it reads
@@ -197,6 +201,24 @@ records as admitted on judgment — a closed set, currently `{CL-0014}` —
 can never meet that bar, because its premise holds and what is thin is its
 grounding. Without its own row such a rule would be *harder* to remove than
 a grounded one, which is backwards.
+
+**Coverage gaps.** A coverage gap is not a finding — it says part of the
+stack was never linted — so `--fail-on` does not gate it: an unresolved
+`include:` or cross-file `extends:` exits 2 at every threshold, `critical`
+included. Only `--allow-partial-coverage` clears one, and until
+[ADR-036](adr/036-resolve-references-that-stay-inside-the-project.md) that
+flag was not named anywhere in the compatibility promise. So neither hatch
+that promise offers for a MINOR — pin the version, or use `--fail-on` —
+reaches a *newly added* gap condition: it turns a threshold-gated pipeline
+red with no documented remedy short of editing the Compose file. 0.18.0 did
+exactly that. Hence the runway: announce the condition one release ahead as
+a stderr warning plus a machine-readable note, enforce it as exit 2 the
+next release, the same shape ADR-031 gives a severity upgrade. Retiring a
+condition needs no runway — it can only turn a red build green — but it is
+still a MINOR rather than a PATCH, because resolving a reference that was
+previously refused can surface findings that were invisible before, which
+is the new-findings class. Neither row is "adding a new non-zero exit
+code": the codes and their meanings do not move.
 
 **Amending this policy.** The ladder comes from
 [ADR-030](adr/030-the-policy-is-part-of-the-contract.md) and governs every
@@ -225,7 +247,7 @@ version number.
 - [ ] `git pull --ff-only` — up to date with origin.
 - [ ] `ruff check src/ tests/`
 - [ ] `ruff format --check src/ tests/`
-- [ ] `mypy src/`
+- [ ] `mypy src/ tests/`
 - [ ] `pytest`
 - [ ] CI on `main` is green for the commit you're about to release.
 - [ ] No open Renovate PRs you meant to merge first.
@@ -258,6 +280,29 @@ version number.
       contributions with no attribution and had to be corrected after the
       fact — release bodies are editable, so fix it there too if this is
       caught late.)
+- [ ] **No unresolved Compose-pin bump.** The differential suites are graded
+      against one pinned Compose plugin, installed by
+      `.github/scripts/install-compose-plugin.sh` from the `COMPOSE_VERSION`
+      pin in `ci.yml`; the pytest header names the version that answered.
+      Renovate opens a PR when Compose releases, and that PR's CI is where a
+      Compose release that changed a loader rule shows up. A red run on it is
+      triaged into exactly one of three outcomes, never left open across a
+      release:
+
+      1. **Compose changed.** Update the affected case to what the new
+         version does, and say so in `CHANGELOG.md` — under the behaviour
+         that moved if a finding changed, or under "Known limitations" if
+         one did not.
+      2. **We were wrong.** Fix the loader. The pin bump only revealed a
+         defect that was already shipped.
+      3. **A new deliberate divergence.** Add an entry to
+         `tests/oracle_harness/_divergences.py` with the ADR or issue that
+         decides it, and a matching generator check so the harness's seeds
+         keep avoiding it.
+
+      Reaching for (3) because (1) and (2) are more work is how the registry
+      becomes a suppression list and coverage silently shrinks. An entry with
+      no decision behind it is a bug that has been written down.
 - [ ] `.vex/compose-lint.openvex.json` is current: any new pip (or other
       stripped-component) CVE that a scanner now reports against the image
       is either covered by an existing `not_affected` statement with
@@ -470,15 +515,37 @@ After approval, `publish` and `docker-publish` run in parallel.
 
 - **One channel's smoke is broken but the other must ship**: use the
   manual escape hatch at **Actions → Publish channel (manual) → Run
-  workflow**. Enter the tag and select the channel. That workflow bypasses
-  the shared gate but still requires the per-channel environment approval
-  (`pypi` or `dockerhub`). Document why you used it in the GitHub Release
-  notes.
+  workflow**. Under **Use workflow from**, pick the **tag**, not `main`:
+  the publish environments admit `v*` tags only, so a run dispatched from
+  `main` fails at the publish job with zero steps executed (the 2026-04-15
+  run history shows exactly that). Then enter the tag and select the
+  channel. That workflow bypasses the shared gate; what remains is
+  `verify-tag` (the tag must be signed by a key in
+  `.github/allowed_signers`) and the environments' tags-only policy. There
+  is no approval click on this path — the signed tag is the control.
+  Document why you used it in the GitHub Release notes.
 - **TestPyPI publish fails**: fix forward. Delete the tag locally and on
   origin (`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`),
   land the fix via PR, re-tag with the **same** version number, and push
   again. TestPyPI allows overwriting a yanked version on retry; real
-  PyPI does not, so always retry on TestPyPI first.
+  PyPI does not, so always retry on TestPyPI first. The `release tags`
+  ruleset blocks deleting or moving any `vX.Y.Z` tag; a repository admin
+  bypasses it, and the push is refused with the ruleset's name for anyone
+  else. Rewriting a release tag is deliberately an admin act, so if the
+  push is refused, that is the ruleset doing its job — not a transient
+  error to retry.
+- **A pre-gate job failed, but the artifact is fine** (a `testpypi-smoke`
+  index-propagation flake is the usual case): re-run **the failed job**, not
+  the workflow. Use **Actions → the run → Re-run failed jobs**, or
+  `POST /repos/tmatens/compose-lint/actions/runs/{run_id}/rerun-failed-jobs`.
+  That reuses the successful `testpypi` upload. Re-running the **whole**
+  workflow instead re-attempts `testpypi`, which TestPyPI rejects as a
+  duplicate upload — so the intuitive action is the one that fails, and it
+  fails in a way that looks like a second, unrelated problem. Nothing is
+  published either way: a pre-gate failure skips `release-gate` and everything
+  after it, so the tag stays valid and no version number is burned. Delete and
+  re-cut the tag only once you have established the failure is *not*
+  transient — re-running the job is the cheap test for that.
 - **Real PyPI publish fails after TestPyPI succeeded**: do **not** reuse
   the version number. Bump to `X.Y.Z+1` (usually a patch), land the fix,
   and cut a new release. PyPI treats deleted versions as permanently
@@ -499,7 +566,8 @@ After approval, `publish` and `docker-publish` run in parallel.
   release and no GitHub Release is untraceable back to source.
 - **Release workflow ran but nothing published**: tags created via the
   GitHub API with `GITHUB_TOKEN` don't trigger downstream workflows.
-  Delete the tag and re-push it as a signed tag from your workstation
+  Delete the tag (the `release tags` ruleset makes this an admin-only
+  act, see above) and re-push it as a signed tag from your workstation
   (see "Tag and release" above).
 
 ## Credential scoping (open items)
@@ -529,25 +597,25 @@ To close the rest:
 Until step 3, a repo-level secret is readable by any workflow in the
 repository, so steps 1–2 alone change nothing.
 
-### Split the Docker Hub PAT by capability
+### Split the Docker Hub PAT by capability (half done)
 
-One `Read, Write, Delete` PAT is referenced by every Docker Hub job, including
-read-only ones (`docker-smoke`, `scout`, `report`). A leak from any of them
-carries delete capability for the whole namespace — the scope of the credential
-is set by the single most privileged consumer.
+The scope of a shared credential is set by its most privileged consumer, so a
+leak from a scan job used to carry delete capability for the whole namespace.
+Today two tokens are routed by need; `tests/test_release_layer.py` holds the
+routing:
 
-Mint three tokens and route them by need:
-
-| Token | Scope | Used by |
+| Secret | Scope | Used by |
 |---|---|---|
-| `DOCKERHUB_TOKEN_READ` | Read | `docker-smoke`, `scout`, `report` |
-| `DOCKERHUB_TOKEN_WRITE` | Read, Write | the four build/publish jobs |
-| `DOCKERHUB_TOKEN_ADMIN` | Read, Write, Delete | the two `dockerhub-description` jobs only |
+| `DOCKERHUB_READ_TOKEN` | Public Repo Read-only | the daily `scout-scan` and `vuln-report` logins, and `publish.yml`'s pre-approval `docker-scout` job — the jobs that pull and scan |
+| `DOCKERHUB_TOKEN` | Read, Write, Delete | the four build/publish jobs (they push by digest, then assemble the manifest) and the two description syncs |
 
-The ADMIN token should live in the `dockerhub-description` environment above,
-so the other jobs cannot reference it even by name. Renaming the secrets is a
-breaking change to the release pipeline, so do it in one pass: add the new
-secrets first, land the workflow change, then revoke the old PAT.
+Still open: the write token carries Delete only for the description sync, so a
+`Read, Write` token for the four push jobs and a Delete-capable one confined to
+the `dockerhub-description` environment above would finish the split. Both need
+the current token's value re-entered or a fresh token minted, so they happen at
+the next rotation. Add the new secrets first, land the workflow change, then
+revoke the old PAT — renaming a secret the release pipeline reads is a breaking
+change if done in the other order.
 
 ## Why this checklist exists
 

@@ -26,6 +26,13 @@ theme:
         icon: material/brightness-4
         name: Switch to light mode
 
+# Per-page <title> and meta description, derived from existing content
+# (front matter is unavailable: --explain prints these files raw).
+hooks:
+  - scripts/mkdocs_seo_hook.py
+  # Sitemap <lastmod> per page, from git rather than the build date.
+  - scripts/mkdocs_git_dates_hook.py
+
 markdown_extensions:
   - toc:
       permalink: true
@@ -79,7 +86,9 @@ nav:
   - Guides:
       - Configuration: configuration.md
       - "CLI reference": cli.md
+      - "What a run reads": what-a-run-reads.md
       - "Fixing findings": fix.md
+      - "GitHub Action": github-action.md
       - "Forgejo Actions": forgejo.md
       - Severity levels: severity.md
       - Hardening walkthrough: hardening.md

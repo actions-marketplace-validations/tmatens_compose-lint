@@ -6,7 +6,7 @@ compose-lint today ships 27 security rules, PyPI distribution, a published GitHu
 
 compose-lint's differentiation is depth in Compose-specific security, not distribution breadth. Competitors (KICS, Checkov, Trivy) cover Compose as one format among many; they are wide and shallow per-format. Compose-lint wins by being the one tool that tells you exactly what's wrong with a Compose file and exactly how to fix it. Roadmap priorities are ordered around that thesis.
 
-Open issues #4 (CL-0006 capability guidance) and #111 (real-world examples library) are the live signal from real-world usage now that #5 is closed. Distribution items beyond the already-shipped Docker image have no demand signal and are deprioritized accordingly.
+The usage-driven asks that shaped the last two milestones — #5 (per-service overrides), #4 (CL-0006 capability guidance) and #111 (real-world examples library) — are all closed and shipped. The live signal now runs through the 1.0 stability commitment (Milestone 4) and the one Milestone 3 item still open, shellcheck ([ADR-007](adr/007-shellcheck-integration.md), pending decision). Distribution items beyond the already-shipped Docker image have no demand signal and are deprioritized accordingly.
 
 ---
 
@@ -16,7 +16,7 @@ Shipped in v0.3.0. Added 9 rules (CL-0011 – CL-0019) plus CL-0010 `uts: host` 
 
 ---
 
-## Milestone 2 — Configuration Depth (v0.4) [shipped]
+## Milestone 2 — Configuration Depth (v0.4) [complete]
 
 Per-service rule overrides shipped in v0.4.0 (issue #5, [ADR-010](adr/010-per-service-rule-overrides.md)). `.compose-lint.yml` now supports `exclude_services` per rule, with mapping (service → reason) and list forms. Excluded services still produce suppressed findings carrying the per-service reason — same suppression plumbing as global disables.
 
@@ -50,7 +50,7 @@ Turn findings into fixes. This is where the product's differentiation grows the 
 **`--explain CL-XXXX`** _(shipped in v0.4.x)_ — prints the full prose from `docs/rules/CL-XXXX.md` in the terminal, reducing context-switching to the browser during triage. Rule-doc markdown is force-included into the wheel at build time. No new deps; pulled forward out of Milestone 3 because it's strictly additive and unblocks the `--fix` UX work.
 
 **`fix` subcommand** _(shipped; promoted to the documented, SemVer-covered surface in 0.11.0 — [ADR-014](adr/014-fix-remediation.md))_ — auto-fix for safe, unambiguous rules:
-- Five fixers: CL-0003 (`no-new-privileges:true`), CL-0005 (bind published ports to `127.0.0.1`), CL-0007 (`read_only: true`), CL-0009, CL-0014.
+- Six fixers: CL-0003 (`no-new-privileges:true`), CL-0005 (bind published ports to `127.0.0.1`), CL-0007 (`read_only: true`), CL-0009, CL-0014, CL-0022 (drop `exec`/`suid` from a tmpfs entry).
 - Dry run by default; `fix --apply` writes in-place via an atomic swap; `--only CL-XXXX` scopes to named rules.
 - Refuses anchors/merge keys/`${VAR}` regions and guards every apply with a re-parse + verify-apply pass.
 - Out of scope for auto-fix: CL-0001 (socket proxy replacement is non-trivial), CL-0006 (capability lists are image-specific), CL-0016 (correct secret management is context-dependent).
@@ -64,7 +64,7 @@ Turn findings into fixes. This is where the product's differentiation grows the 
 
 ---
 
-## Milestone 3.5 — Severity Grounding (v0.16) [shipped]
+## Milestone 3.5 — Severity Grounding (v0.16) [complete]
 
 A prerequisite for the 1.0 freeze rather than a feature: after 1.0 a severity change is a breaking change, so the numbers have to be defensible before the contract closes over them.
 
@@ -83,7 +83,7 @@ _Not covered by this milestone:_ the fixers, the parser, line-number accuracy an
 v1.0 is the **stability commitment**: the CLI surface, exit codes, configuration schema, and the JSON/SARIF output shapes come under SemVer. Breaking any of them after 1.0 requires a major version bump. The VS Code extension is explicitly *not* a 1.0 blocker — it's a reach multiplier that doesn't gate stability, and moves to Milestone 5.
 
 **GA criteria:**
-- **Stable, documented contract** — CLI flags, exit codes ([ADR-006](adr/006-exit-codes.md)), the `.compose-lint.yml` schema, and the JSON + SARIF output shapes are frozen and documented as the 1.0 surface. The JSON output gains a versioned envelope before the freeze, so run-level metadata (tool version, parse errors) can be added later without breaking consumers.
+- **Stable, documented contract** — CLI flags, exit codes ([ADR-006](adr/006-exit-codes.md)), the `.compose-lint.yml` schema, and the JSON + SARIF output shapes are frozen and documented as the 1.0 surface. _Versioned JSON envelope done._ It shipped under [ADR-015](adr/015-machine-readable-output-contract.md): `check --format json` emits a schema `version` alongside a `tool` block, so run-level metadata (parse errors, and more later) can be added without breaking consumers. What remains is the freeze itself — declaring the surface closed.
 - **`fix` resolved** — _done._ Shipped as GA and brought under the SemVer contract in 0.11.0 ([ADR-014](adr/014-fix-remediation.md)), independently of the 1.0 cut.
 - **Grounding + severity audit complete** — _done for severity._ Every rule cites OWASP/CIS/Docker and derives its severity from the documented model (Milestone 3.5). What remains before the freeze is confirming no further severity change is pending that would alter a CI gate.
 - **Documented upgrade/deprecation policy** — the SemVer stability promise (rule additions, severity changes, config and output-shape changes) and the deprecation lifecycle, in [compatibility.md](compatibility.md).
@@ -106,6 +106,7 @@ Pursue based on user demand after v1.0.
 | LSP server | Language Server Protocol support — follows VS Code extension post-v1.0 |
 | Linux packages (`.deb`/`.rpm`) | Revisit [ADR-008](adr/008-linux-packages.md) on first concrete user request |
 | Homebrew tap | `brew install tmatens/tap/compose-lint` (macOS Intel/ARM + Homebrew-on-Linux). Closes the "not everyone has pip" gap with working `brew upgrade` UX. Formula in a separate `homebrew-tap` repo; release workflow syncs via `brew bump-formula-pr`. Pursue on demand signal, like the row above |
+| Agent skill / plugin | A packaged distillation of [Automation and agent use](cli.md#automation-and-agent-use), so the judgment layer reaches an agent working in a repo that has wired neither the pre-commit hook nor the Action. Deferred in [ADR-035](adr/035-defer-the-agent-skill-channel.md): no demand signal, and the channel has no staging or signing analog for [DISTRIBUTION.md](DISTRIBUTION.md). The shipped docs section and the two gates cover everything else |
 
 ---
 

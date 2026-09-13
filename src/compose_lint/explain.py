@@ -14,9 +14,29 @@ from pathlib import Path
 
 _RULE_ID_RE = re.compile(r"^CL-\d{4}$")
 
+# Ids that were used and retired. They must not reappear: reusing one
+# silently rewrites the meaning of a suppression someone already wrote
+# (ADR-005). Shared with tests/test_rule_surfaces.py.
+#
+# The set is closed. It is the pre-1.0 reclamation, which ended with CL-0023
+# (ADR-028). A retirement after 1.0 does *not* join it: the rule keeps a
+# tombstone doc page (ADR-032 step 4), so `--explain` resolves it and says
+# what refuted it rather than reporting it as gone. Anything here has no page
+# to resolve, which is what earns the different message.
+FALLOW_RULE_IDS = frozenset({"CL-0012", "CL-0015", "CL-0023"})
+
 
 class UnknownRuleError(ValueError):
-    """Raised when a rule id has no corresponding documentation file."""
+    """Raised when a rule id cannot be explained.
+
+    ``kind`` is ``malformed`` (not CL-XXXX), ``retired`` (fallow under
+    ADR-028), or ``unknown`` (well-formed, no such rule).
+    """
+
+    def __init__(self, rule_id: str, *, kind: str) -> None:
+        super().__init__(rule_id)
+        self.rule_id = rule_id
+        self.kind = kind
 
 
 def normalize_rule_id(raw: str) -> str:
@@ -27,7 +47,7 @@ def normalize_rule_id(raw: str) -> str:
     """
     candidate = raw.strip().upper()
     if not _RULE_ID_RE.match(candidate):
-        raise UnknownRuleError(raw)
+        raise UnknownRuleError(raw, kind="malformed")
     return candidate
 
 
@@ -49,4 +69,6 @@ def load_rule_doc(rule_id: str) -> str:
     if repo_copy.is_file():
         return repo_copy.read_text(encoding="utf-8")
 
-    raise UnknownRuleError(canonical)
+    if canonical in FALLOW_RULE_IDS:
+        raise UnknownRuleError(canonical, kind="retired")
+    raise UnknownRuleError(canonical, kind="unknown")

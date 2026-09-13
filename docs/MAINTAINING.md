@@ -74,7 +74,91 @@ the head SHA. Approving a commit that is about to be rebased burns the approval
 for nothing. When a PR needs both a rebase and review fixes, post the review
 first so one push clears everything.
 
+## Writing a good first issue
+
+Every `good first issue` here is written by a maintainer, and the review that
+follows is graded against what the maintainer knew when writing it — which is
+more than the issue says. Of the seven external PRs to date, most of the
+review rounds asked for something the issue did not: the rule-doc row that was
+in the Scope prose but not in the file list (#685), the `docs/configuration.md`
+bullet nothing mentioned (#826), the scoping comment an ADR implied (#795). A
+contributor reads **Scope** as the whole boundary — it was written to reassure
+— so what it omits is what comes back as a review comment.
+
+Write the review checklist into the issue, before the review. Copy this
+skeleton; the boilerplate has drifted when it lived in saved replies (one
+issue said `mypy src/` while CI ran `mypy src/ tests/`), so this file is its
+only home.
+
+````markdown
+## What happens
+
+<!-- Console transcript. Exit codes. Reproduced on which version. -->
+
+## Why
+
+<!-- file:line of the cause, re-checked against main @ <sha>. -->
+
+## The fix
+
+<!-- The approach. Name the traps: what an earlier attempt got wrong. -->
+
+## Also update
+
+<!-- Every file outside the code that has to change, with what changes in it.
+     This is the list the reviewer will check. If it is empty, say so. -->
+
+- `docs/…` — …
+- `CHANGELOG.md` — not needed; the releaser writes your credit line.
+
+## Tests
+
+<!-- Which file, which existing test to model on, one case per behaviour. -->
+
+## Done when
+
+<!-- Self-checkable, in the contributor's terms. Whatever you would check at
+     review goes here instead. -->
+
+- [ ] … (one line per row of the behaviour table above)
+- [ ] `scripts/preflight.sh` passes on the branch
+- [ ] Every file under *Also update* is in the diff
+
+## Out of scope
+
+<!-- What NOT to touch. This is a boundary, not a summary of the work. -->
+
+---
+
+## Before you start
+
+compose-lint's contribution process is stricter than most, and it — not the
+patch — is where a first PR usually stalls. All of it is in
+[CONTRIBUTING.md](../blob/main/CONTRIBUTING.md); the short version:
+
+- Fork, then add this repo as `upstream` — `origin` is your fork, and
+  `git rebase origin/main` does nothing useful there.
+- Run `scripts/preflight.sh` before every push. It runs every gate CI runs,
+  including the commit checks (DCO trailer matching your author email
+  exactly, subject style) that CI cannot report on a first PR until a
+  maintainer approves the run.
+- Your first PR's checks stay grey until that approval. That is the fork
+  gate, not something you did; a maintainer will get to it.
+- Rebase with `--force-with-lease`, never the **Update branch** button.
+
+Ask on the issue if anything is unclear. Happy to help you land it.
+````
+
 ## Reviewing
+
+Split every review into what the contributor must change and what you will
+handle. If the issue and CONTRIBUTING did not ask for it, it is not a change
+request on someone's first PR: fix it yourself in a follow-up, or file it, and
+say which. And a review comment that could have been a test is a bug in CI,
+not a note for the contributor — write the test (`tests/test_config_surfaces.py`
+and `tests/test_rule_doc_surfaces.py` are the shape) so the next person is told
+by a red check while the branch is still open, not by you a day later.
+
 
 Post findings as a **review**, not a plain issue comment — a review carries a
 state, sets `reviewDecision`, and shows in the Reviewers panel:
@@ -110,7 +194,7 @@ or overtaken rather than fixed, since it keeps the objection legible.
 |---|---|
 | No blocking state | `gh pr view <n> --json mergeStateStatus` → `CLEAN` |
 | Checks ran on the **current** head | Compare the run's `head_sha` to `headRefOid`; a green run on a superseded SHA proves nothing |
-| Branch is up to date | `behind_by: 0` — the ruleset sets `strict_required_status_checks_policy` |
+| No conflicts | `mergeStateStatus` is not `DIRTY`. `behind_by > 0` is fine: the ruleset does not require up to date, and `main`'s own run — never cancelled — re-tests the merged result |
 | Review threads | All resolved (CONTRIBUTING asks for this; it is not enforced) |
 | Rule predicates touched | Regenerate `tests/corpus_snapshot.json.gz` yourself and review the drift — contributors are asked to leave it alone |
 
@@ -133,19 +217,33 @@ worth knowing:
   the PR is the right place for it.
 
 GitHub signs the squash commit with its own key, so `main`'s history verifies
-regardless of whether the contributor signed. Their signature is evidence about
-the PR, not about what lands. Note that nothing enforces it server-side: there
-is no `required_signatures` ruleset rule and no CI job, and `.githooks/pre-push`
-only binds contributors who ran `git config core.hooksPath .githooks`.
+regardless of whether the contributor signed — squash is the only merge method
+enabled, and every commit on `main` reports `verified: true` from the API.
+That is the policy: **contributor signing is recommended, not required.** A
+signed PR commit is evidence about the PR — it binds the author field to the
+contributor's account, which the DCO trailer alone cannot — not about what
+lands. Nothing enforces it and nothing should: there is no
+`required_signatures` rule, no CI job, and the pre-push hook and
+`scripts/preflight.sh` report an unsigned commit as a note. This matches the
+DCO-plus-signed-releases posture of the kernel and CNCF projects; requiring
+per-commit signatures from outside contributors would put a setup step in
+front of a first PR to protect nothing that ships.
 
 ## Known friction
 
-`strict_required_status_checks_policy` requires a PR to be up to date before
-merging, and Renovate merges digest PRs daily. An external PR that sits for a
-day needs a rebase, the rebase force-push re-arms the approval gate, and the
-maintainer approves a second time. Merging external contributions promptly is
-the cheapest mitigation; a merge queue would remove the requirement entirely,
-at the cost of teaching `ci.yml` the `merge_group` trigger.
+The ruleset used to require a PR to be up to date before merging
+(`strict_required_status_checks_policy`). With `main` moving ~40 times a week,
+an external PR open for an afternoon was behind by evening, and every one of
+the six rebases asked for in the sweep that dropped it (#685 ×3, #795 ×2, #829)
+was "behind", not a conflict. The requirement was dropped after 300 completed
+`main` runs with zero failures: `main`'s own push run — no longer cancelled by
+the next merge — is what proves a merged result, and a real conflict still
+blocks the merge on its own. The trade is a *semantic* conflict between two
+concurrent PRs landing as a red `main` run ten minutes later, fixed forward.
+Watch condition: a `main` run that **fails** (not cancels) on a merge whose PR
+was green. If that ever happens, adopt the merge queue then — it removes the
+gap at the cost of teaching `ci.yml` the `merge_group` trigger and turning
+every merge into a ten-minute enqueue.
 
 Contributor-side friction — the DCO check being invisible until approval, and
 the sign-off guidance that does not work — is tracked in
